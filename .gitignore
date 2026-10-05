@@ -1,0 +1,17 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+instance/
+.DS_Store
+
+# Installers and app shortcuts (not part of the project)
+GitHubDesktop-arm64.zip
+GitHub Desktop.app/
+Claude
+Claude alias
+VS Code
+VS Code alias
+VS Code alias 2
+Cursor Installer
+Cursor Installer alias

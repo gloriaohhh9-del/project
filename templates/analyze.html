@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Analyze a Track — AURA</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body class="auth-page">
+
+  <nav class="navbar" id="navbar">
+    <div class="navbar-inner">
+      <div class="navbar-left">
+        <a href="{{ url_for('index') }}" class="navbar-brand">AURA</a>
+        <a href="{{ url_for('draw') }}" class="navbar-draw-btn">✏️ Draw</a>
+        <a href="{{ url_for('analyze') }}" class="navbar-analyze-btn is-active">🎧 Analyze</a>
+      </div>
+
+      <ul class="navbar-menu" id="navbar-menu">
+        <li><a href="{{ url_for('index') }}">Home</a></li>
+        <li><a href="{{ url_for('logout') }}" class="navbar-cta">Log Out</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flash-container">
+        {% for category, message in messages %}
+          <div class="flash flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <main class="analyze-main">
+    <div class="analyze-card">
+      <h1>Analyze a Track</h1>
+      <p class="auth-subtitle">
+        Upload a song. AURA measures tempo, energy, rhythm, and key directly from
+        the audio, asks ChatGPT to read its mood and instrumentation, then turns
+        both into a piece of generative art.
+      </p>
+
+      <form class="auth-form" method="post" enctype="multipart/form-data">
+        <div class="form-group">
+          <label for="music_file">Music file (.mp3 or .wav)</label>
+          <input
+            type="file"
+            id="music_file"
+            name="music_file"
+            accept=".mp3,.wav,audio/mpeg,audio/wav"
+            required
+          >
+        </div>
+
+        <button type="submit" class="btn-primary">Analyze &amp; Generate Art</button>
+      </form>
+
+      {% if analysis %}
+        <div class="analysis-result">
+          <h2>Analysis</h2>
+          <ul class="analysis-list">
+            <li><strong>Tempo:</strong> {{ analysis.tempo_bpm }} BPM</li>
+            <li><strong>Key:</strong> {{ analysis.key }}</li>
+            <li><strong>Duration:</strong> {{ analysis.duration_sec }}s ({{ "Stereo" if analysis.is_stereo else "Mono" }})</li>
+            <li><strong>Mood:</strong> {{ analysis.mood }}</li>
+            <li><strong>Loudness:</strong> {{ (analysis.energy * 100) | round | int }}%</li>
+            <li><strong>Dynamic range:</strong> {{ (analysis.dynamic_range * 100) | round | int }}%</li>
+            <li><strong>Brightness:</strong> {{ (analysis.brightness * 100) | round | int }}%</li>
+            <li><strong>Rhythm density:</strong> {{ (analysis.rhythm_density * 100) | round | int }}%</li>
+            <li><strong>Harmonic tension:</strong> {{ (analysis.harmonic_tension * 100) | round | int }}%</li>
+            <li><strong>Timbre sharpness:</strong> {{ (analysis.timbre_sharpness * 100) | round | int }}%</li>
+            <li><strong>Structural sections found:</strong> {{ analysis.section_count }}</li>
+            <li><strong>Note/beat events plotted:</strong> {{ analysis.note_event_count }}</li>
+            {% if analysis.dominant_instruments %}
+              <li><strong>Instruments:</strong> {{ analysis.dominant_instruments | join(', ') }}</li>
+            {% endif %}
+          </ul>
+          <p class="analysis-footnote">
+            Tempo, key, loudness, dynamics, rhythm, harmony, timbre, structure, and stereo
+            position are all measured directly from the audio signal. Mood and instrumentation
+            are ChatGPT's interpretation.
+          </p>
+        </div>
+
+        <div class="artwork-frame">
+          {% if artwork_image %}
+            <img src="{{ artwork_image }}" alt="Generated artwork" class="artwork-image">
+          {% else %}
+            {{ artwork_svg | safe }}
+          {% endif %}
+        </div>
+        {% if artwork_description %}
+          <p class="artwork-description">{{ artwork_description }}</p>
+        {% endif %}
+      {% endif %}
+    </div>
+  </main>
+
+</body>
+</html>

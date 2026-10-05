@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Drawing Page — AURA</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body class="auth-page">
+
+  <nav class="navbar" id="navbar">
+    <div class="navbar-inner">
+      <div class="navbar-left">
+        <a href="{{ url_for('index') }}" class="navbar-brand">AURA</a>
+        <a href="{{ url_for('draw') }}" class="navbar-draw-btn is-active">✏️ Draw</a>
+        <a href="{{ url_for('analyze') }}" class="navbar-analyze-btn">🎧 Analyze</a>
+      </div>
+
+      <ul class="navbar-menu" id="navbar-menu">
+        <li><a href="{{ url_for('index') }}">Home</a></li>
+        <li><a href="{{ url_for('logout') }}" class="navbar-cta">Log Out</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flash-container">
+        {% for category, message in messages %}
+          <div class="flash flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <main class="draw-main">
+    <div class="draw-toolbar">
+      <div class="tool-group">
+        <button class="tool-btn is-active" data-tool="pencil" title="Pencil" type="button">✏️</button>
+        <button class="tool-btn" data-tool="brush" title="Brush" type="button">🖌️</button>
+        <button class="tool-btn" data-tool="eraser" title="Eraser" type="button">🧽</button>
+      </div>
+
+      <div class="tool-group">
+        <button class="tool-btn" data-tool="line" title="Line (hold Shift to snap to 45°)" type="button">📏</button>
+        <button class="tool-btn" data-tool="rectangle" title="Rectangle (hold Shift for square)" type="button">▭</button>
+        <button class="tool-btn" data-tool="ellipse" title="Ellipse (hold Shift for circle)" type="button">⚪</button>
+      </div>
+
+      <div class="tool-group">
+        <label for="colorPicker">Color</label>
+        <input type="color" id="colorPicker" value="#a78bfa">
+      </div>
+
+      <div class="tool-group">
+        <label for="sizeSlider">Size</label>
+        <input type="range" id="sizeSlider" min="1" max="60" value="6">
+        <span id="sizeValue">6</span>
+      </div>
+
+      <div class="tool-group">
+        <label for="opacitySlider">Opacity</label>
+        <input type="range" id="opacitySlider" min="10" max="100" value="100">
+        <span id="opacityValue">100%</span>
+      </div>
+
+      <div class="tool-group">
+        <button class="action-btn" id="undoBtn" title="Undo" type="button" disabled>↶ Undo</button>
+        <button class="action-btn" id="redoBtn" title="Redo" type="button" disabled>↷ Redo</button>
+        <button class="action-btn" id="clearBtn" title="Clear active layer" type="button">🗑️ Clear</button>
+      </div>
+
+      <div class="tool-group">
+        <button class="action-btn" id="insertImageBtn" title="Insert image onto active layer" type="button">🖼️ Insert Image</button>
+        <input type="file" id="imageInput" accept="image/*" hidden>
+        <button class="action-btn" id="downloadBtn" title="Download drawing" type="button">⬇️ Save</button>
+      </div>
+    </div>
+
+    <div class="draw-workspace">
+      <div class="draw-canvas-wrap" id="canvasStack"></div>
+
+      <aside class="layers-panel">
+        <div class="layers-panel-header">
+          <span>Layers</span>
+          <button class="action-btn" id="addLayerBtn" type="button">+ Layer</button>
+        </div>
+        <ul class="layers-list" id="layersList"></ul>
+      </aside>
+    </div>
+  </main>
+
+  <script src="{{ url_for('static', filename='js/draw.js') }}"></script>
+</body>
+</html>
