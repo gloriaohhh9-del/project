@@ -16,3 +16,7 @@ VS Code alias
 VS Code alias 2
 Cursor Installer
 Cursor Installer alias
+
+# Firebase service-account key (database credentials)
+firebase-key.json
+*-firebase-adminsdk-*.json

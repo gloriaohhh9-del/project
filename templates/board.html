@@ -74,7 +74,7 @@
                 {% if art.analysis.mood %}{{ art.analysis.mood }} · {% endif %}
                 {% if art.analysis.tempo_bpm %}{{ art.analysis.tempo_bpm }} BPM · {% endif %}
                 {% if art.analysis.key %}{{ art.analysis.key }} · {% endif %}
-                {{ (art.published_at or art.created_at)[:10] }}
+                {{ art.date }}
               </p>
 
               <details class="art-card-edit">
@@ -108,7 +108,7 @@
                             {% if not art.title %}disabled title="Add a title first"{% endif %}>Publish</button>
                   </form>
                 {% endif %}
-                <a class="action-btn" href="{{ art.image_url }}" download="{{ (art.title or 'aura-artwork') ~ ('.svg' if art.image_mime == 'image/svg+xml' else '.png') }}">⬇️</a>
+                <a class="action-btn" href="{{ art.image_url }}" download="{{ (art.title or 'aura-artwork') ~ {'image/svg+xml': '.svg', 'image/webp': '.webp'}.get(art.image_mime, '.png') }}">⬇️</a>
                 <form method="post" action="{{ url_for('board_delete', artwork_id=art.id) }}"
                       onsubmit='return confirm({{ ("Delete “" ~ (art.title or "Untitled") ~ "”? This can’t be undone.")|tojson }})'>
                   <input type="hidden" name="next" value="{{ back }}">

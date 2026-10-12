@@ -7,3 +7,5 @@ soundfile>=0.12.1
 numpy>=1.26.0
 mutagen>=1.47.0
 gunicorn>=23.0.0
+firebase-admin>=7.0.0
+Pillow>=11.0.0

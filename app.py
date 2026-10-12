@@ -3,7 +3,6 @@ import io
 import json
 import os
 import re
-import sqlite3
 import threading
 import time
 import uuid
@@ -15,6 +14,7 @@ from flask import Flask, abort, flash, g, jsonify, redirect, render_template, re
 from openai import OpenAI
 from werkzeug.security import check_password_hash, generate_password_hash
 
+import store
 from art_generator import generate_svg
 from audio_analysis import analyze_audio
 
@@ -22,9 +22,6 @@ load_dotenv()
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
-# In production DATABASE_PATH points at a persistent disk (see render.yaml);
-# locally the database lives in instance/.
-app.config["DATABASE"] = os.environ.get("DATABASE_PATH") or os.path.join(app.instance_path, "aura.db")
 # Only send the login cookie over HTTPS when deployed behind it.
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE") == "1"
 app.config["MAX_CONTENT_LENGTH"] = 15 * 1024 * 1024  # 15 MB upload limit
@@ -44,58 +41,6 @@ def allowed_audio_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_AUDIO_EXTENSIONS
 
 
-def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(app.config["DATABASE"])
-        g.db.row_factory = sqlite3.Row
-    return g.db
-
-
-@app.teardown_appcontext
-def close_db(exception):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
-
-
-def init_db():
-    os.makedirs(os.path.dirname(app.config["DATABASE"]), exist_ok=True)
-    db = sqlite3.connect(app.config["DATABASE"])
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    # Artworks saved from an Analyze result. Drafts are private to the artist;
-    # published ones also appear in the public gallery.
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS artworks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL REFERENCES users (id),
-            title TEXT NOT NULL DEFAULT '',
-            description TEXT NOT NULL DEFAULT '',
-            image BLOB NOT NULL,
-            image_mime TEXT NOT NULL,
-            analysis_json TEXT NOT NULL DEFAULT '{}',
-            is_published INTEGER NOT NULL DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            published_at TIMESTAMP
-        )
-        """
-    )
-    db.execute("CREATE INDEX IF NOT EXISTS idx_artworks_user ON artworks (user_id)")
-    db.commit()
-    db.close()
-
-
 def login_required(view):
     @wraps(view)
     def wrapped_view(**kwargs):
@@ -109,17 +54,14 @@ def login_required(view):
 
 @app.before_request
 def before_request():
+    # The login stores the user's id and name in the signed session cookie,
+    # so ordinary page loads don't need a database round trip.
     g.user = None
     if "user_id" in session:
-        db = get_db()
-        g.user = db.execute(
-            "SELECT id, username, email FROM users WHERE id = ?",
-            (session["user_id"],),
-        ).fetchone()
-
-
-with app.app_context():
-    init_db()
+        if "username" not in session:
+            session.clear()
+        else:
+            g.user = {"id": session["user_id"], "username": session["username"]}
 
 
 @app.route("/")
@@ -163,21 +105,11 @@ def signup():
                 flash(error, "error")
             return render_template("signup.html")
 
-        db = get_db()
-        existing = db.execute(
-            "SELECT id FROM users WHERE username = ? OR email = ?",
-            (username, email),
-        ).fetchone()
-
-        if existing:
+        try:
+            store.create_user(username, email, generate_password_hash(password, method="pbkdf2:sha256"))
+        except store.AlreadyTaken:
             flash("Username or email is already taken.", "error")
             return render_template("signup.html")
-
-        db.execute(
-            "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
-            (username, email, generate_password_hash(password, method="pbkdf2:sha256")),
-        )
-        db.commit()
 
         flash("Account created successfully. Please log in.", "success")
         return redirect(url_for("login"))
@@ -198,11 +130,7 @@ def login():
             flash("Please enter both username and password.", "error")
             return render_template("login.html")
 
-        db = get_db()
-        user = db.execute(
-            "SELECT id, username, password_hash FROM users WHERE username = ?",
-            (username,),
-        ).fetchone()
+        user = store.find_user_for_login(username)
 
         if user is None or not check_password_hash(user["password_hash"], password):
             flash("Invalid username or password.", "error")
@@ -717,7 +645,11 @@ def analyze_edit(job_id):
 
 MAX_TITLE_CHARS = 120
 MAX_ART_DESCRIPTION_CHARS = 2000
-BOARD_FILTERS = {"all": "", "drafts": "AND is_published = 0", "published": "AND is_published = 1"}
+BOARD_FILTERS = {
+    "all": lambda art: True,
+    "drafts": lambda art: not art["is_published"],
+    "published": lambda art: art["is_published"],
+}
 
 
 def _wants_json():
@@ -741,11 +673,8 @@ def _board_return_url():
 
 
 def _get_own_artwork_or_404(artwork_id):
-    artwork = get_db().execute(
-        "SELECT id, user_id, title, is_published FROM artworks WHERE id = ? AND user_id = ?",
-        (artwork_id, session["user_id"]),
-    ).fetchone()
-    if artwork is None:
+    artwork = store.get_artwork(artwork_id)
+    if artwork is None or artwork["user_id"] != str(g.user["id"]):
         abort(404)
     return artwork
 
@@ -786,41 +715,27 @@ def board_save():
         return fail("There's no artwork to save.")
 
     analysis = job["result"].get("analysis") or {}
-    summary = json.dumps(
-        {
-            "song_title": analysis.get("song_title"),
-            "song_artist": analysis.get("song_artist"),
-            "mood": analysis.get("mood"),
-            "tempo_bpm": analysis.get("tempo_bpm"),
-            "key": analysis.get("key"),
-            "dominant_instruments": analysis.get("dominant_instruments") or [],
-        }
-    )
+    summary = {
+        "song_title": analysis.get("song_title"),
+        "song_artist": analysis.get("song_artist"),
+        "mood": analysis.get("mood"),
+        "tempo_bpm": analysis.get("tempo_bpm"),
+        "key": analysis.get("key"),
+        "dominant_instruments": analysis.get("dominant_instruments") or [],
+    }
 
-    db = get_db()
-    artwork_id = request.form.get("artwork_id", type=int)
-    if artwork_id:
-        _get_own_artwork_or_404(artwork_id)
-        db.execute(
-            """
-            UPDATE artworks
-            SET title = ?, description = ?, image = ?, image_mime = ?, analysis_json = ?,
-                is_published = ?, updated_at = CURRENT_TIMESTAMP,
-                published_at = CASE WHEN ? THEN COALESCE(published_at, CURRENT_TIMESTAMP) END
-            WHERE id = ?
-            """,
-            (title, description, image, image_mime, summary, publish, publish, artwork_id),
-        )
-    else:
-        artwork_id = db.execute(
-            """
-            INSERT INTO artworks (user_id, title, description, image, image_mime, analysis_json,
-                                  is_published, published_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP END)
-            """,
-            (session["user_id"], title, description, image, image_mime, summary, publish, publish),
-        ).lastrowid
-    db.commit()
+    artwork_id = request.form.get("artwork_id") or None
+    try:
+        if artwork_id:
+            _get_own_artwork_or_404(artwork_id)
+            store.update_artwork(
+                artwork_id, image=image, mime=image_mime,
+                title=title, description=description, analysis=summary, is_published=publish,
+            )
+        else:
+            artwork_id = store.create_artwork(g.user, title, description, summary, publish, image, image_mime)
+    except ValueError as exc:
+        return fail(str(exc))
 
     message = "Published to the gallery." if publish else "Saved to your board as a draft."
     if _wants_json():
@@ -829,23 +744,10 @@ def board_save():
     return redirect(url_for("board"))
 
 
-def _artwork_rows(where, params):
-    rows = get_db().execute(
-        f"""
-        SELECT a.id, a.title, a.description, a.analysis_json, a.is_published, a.image_mime,
-               a.created_at, a.published_at, u.username
-        FROM artworks a JOIN users u ON u.id = a.user_id
-        WHERE {where}
-        ORDER BY COALESCE(a.published_at, a.created_at) DESC, a.id DESC
-        """,
-        params,
-    ).fetchall()
-    artworks = []
-    for row in rows:
-        artwork = dict(row)
-        artwork["analysis"] = json.loads(row["analysis_json"] or "{}")
-        artwork["image_url"] = url_for("artwork_image", artwork_id=row["id"])
-        artworks.append(artwork)
+def _for_display(artworks):
+    for art in artworks:
+        art["image_url"] = url_for("artwork_image", artwork_id=art["id"])
+        art["date"] = (art.get("published_at") or art["created_at"]).strftime("%Y-%m-%d")
     return artworks
 
 
@@ -855,20 +757,17 @@ def board():
     show = request.args.get("show", "all")
     if show not in BOARD_FILTERS:
         show = "all"
-    artworks = _artwork_rows(f"a.user_id = ? {BOARD_FILTERS[show]}", (session["user_id"],))
-    counts = get_db().execute(
-        "SELECT COUNT(*) AS total, COALESCE(SUM(is_published), 0) AS published FROM artworks WHERE user_id = ?",
-        (session["user_id"],),
-    ).fetchone()
+    mine = store.list_artworks(user_id=g.user["id"])
+    published = sum(1 for art in mine if art["is_published"])
     return render_template(
         "board.html",
-        artworks=artworks,
+        artworks=_for_display([art for art in mine if BOARD_FILTERS[show](art)]),
         show=show,
-        counts={"all": counts["total"], "published": counts["published"], "drafts": counts["total"] - counts["published"]},
+        counts={"all": len(mine), "published": published, "drafts": len(mine) - published},
     )
 
 
-@app.route("/board/<int:artwork_id>/details", methods=["POST"])
+@app.route("/board/<artwork_id>/details", methods=["POST"])
 @login_required
 def board_update_details(artwork_id):
     artwork = _get_own_artwork_or_404(artwork_id)
@@ -876,78 +775,59 @@ def board_update_details(artwork_id):
     if artwork["is_published"] and not title:
         flash("Published artworks need a title.", "error")
     else:
-        db = get_db()
-        db.execute(
-            "UPDATE artworks SET title = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (title, description, artwork_id),
-        )
-        db.commit()
+        store.update_artwork(artwork_id, title=title, description=description)
         flash("Artwork details updated.", "success")
     return redirect(_board_return_url())
 
 
-@app.route("/board/<int:artwork_id>/publish", methods=["POST"])
+@app.route("/board/<artwork_id>/publish", methods=["POST"])
 @login_required
 def board_publish(artwork_id):
     artwork = _get_own_artwork_or_404(artwork_id)
     if not artwork["title"]:
         flash("Give your artwork a title before publishing it.", "error")
     else:
-        db = get_db()
-        db.execute(
-            """
-            UPDATE artworks SET is_published = 1, updated_at = CURRENT_TIMESTAMP,
-                published_at = COALESCE(published_at, CURRENT_TIMESTAMP)
-            WHERE id = ?
-            """,
-            (artwork_id,),
-        )
-        db.commit()
+        store.update_artwork(artwork_id, is_published=True)
         flash(f"“{artwork['title']}” is now in the gallery.", "success")
     return redirect(_board_return_url())
 
 
-@app.route("/board/<int:artwork_id>/unpublish", methods=["POST"])
+@app.route("/board/<artwork_id>/unpublish", methods=["POST"])
 @login_required
 def board_unpublish(artwork_id):
     _get_own_artwork_or_404(artwork_id)
-    db = get_db()
-    db.execute(
-        "UPDATE artworks SET is_published = 0, published_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-        (artwork_id,),
-    )
-    db.commit()
+    store.update_artwork(artwork_id, is_published=False)
     flash("Moved back to drafts; it's no longer in the gallery.", "success")
     return redirect(_board_return_url())
 
 
-@app.route("/board/<int:artwork_id>/delete", methods=["POST"])
+@app.route("/board/<artwork_id>/delete", methods=["POST"])
 @login_required
 def board_delete(artwork_id):
     _get_own_artwork_or_404(artwork_id)
-    db = get_db()
-    db.execute("DELETE FROM artworks WHERE id = ?", (artwork_id,))
-    db.commit()
+    store.delete_artwork(artwork_id)
     flash("Artwork deleted.", "success")
     return redirect(_board_return_url())
 
 
-@app.route("/artworks/<int:artwork_id>/image")
+@app.route("/artworks/<artwork_id>/image")
 def artwork_image(artwork_id):
     """Published artworks are public; drafts are visible only to their artist."""
-    row = get_db().execute(
-        "SELECT user_id, image, image_mime, is_published FROM artworks WHERE id = ?", (artwork_id,)
-    ).fetchone()
-    if row is None or not (row["is_published"] or row["user_id"] == session.get("user_id")):
+    artwork = store.get_artwork(artwork_id)
+    if artwork is None or not (artwork["is_published"] or artwork["user_id"] == str(session.get("user_id"))):
         abort(404)
-    response = app.response_class(row["image"], mimetype=row["image_mime"])
+    found = store.get_artwork_image(artwork_id)
+    if found is None:
+        abort(404)
+    image, mime = found
+    response = app.response_class(image, mimetype=mime)
     response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
     return response
 
 
 @app.route("/gallery")
 def gallery():
-    return render_template("gallery.html", artworks=_artwork_rows("a.is_published = 1", ()))
+    return render_template("gallery.html", artworks=_for_display(store.list_artworks(published_only=True)))
 
 
 if __name__ == "__main__":
