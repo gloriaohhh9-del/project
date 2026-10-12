@@ -2,10 +2,13 @@ import base64
 import json
 import os
 import sqlite3
+import threading
+import time
+import uuid
 from functools import wraps
 
 from dotenv import load_dotenv
-from flask import Flask, flash, g, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, g, jsonify, redirect, render_template, request, session, url_for
 from openai import OpenAI
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -20,6 +23,13 @@ app.config["DATABASE"] = os.path.join(app.instance_path, "aura.db")
 app.config["MAX_CONTENT_LENGTH"] = 15 * 1024 * 1024  # 15 MB upload limit
 
 ALLOWED_AUDIO_EXTENSIONS = {"mp3", "wav"}
+
+# OpenAI models. Sunburst is the quality-first image model; IMAGE_QUALITY
+# trades speed and cost for detail (low, medium, high, xhigh, max) and can be
+# overridden in .env.
+AUDIO_MODEL = "gpt-audio-1.5"
+IMAGE_MODEL = "gpt-image-2.5-sunburst"
+IMAGE_QUALITY = os.environ.get("IMAGE_QUALITY", "high")
 openai_client = OpenAI() if os.environ.get("OPENAI_API_KEY") else None
 
 
@@ -190,33 +200,81 @@ def logout():
 @app.route("/draw")
 @login_required
 def draw():
-    return render_template("draw.html")
+    # Opened from an Analyze result (?job=...&version=...): load that artwork
+    # version as a locked background so the user can sketch an edit over it.
+    edit_source = None
+    job_id = request.args.get("job")
+    if job_id:
+        job = _get_job_or_404(job_id)
+        versions = job.get("versions") or []
+        version = request.args.get("version", type=int)
+        if version is None or not 0 <= version < len(versions):
+            abort(404)
+        edit_source = {
+            "image_url": url_for("analyze_image", job_id=job_id, version=version),
+            "edit_url": url_for("analyze_edit", job_id=job_id),
+            "back_url": url_for("analyze", job=job_id),
+            "version": version,
+        }
+    return render_template("draw.html", edit_source=edit_source)
 
 
-# DSP (via librosa) now measures tempo, energy, rhythm, and key directly from
-# the audio signal, so GPT is only asked for the qualitative layer it's
-# actually suited to: mood, instrumentation, and a creative color palette.
+# DSP (via librosa) measures tempo, energy, rhythm, and key directly from the
+# audio signal. Those numbers are handed to GPT as quiet background context --
+# GPT listens to the track itself and writes the art direction in its own
+# words, so the image is an interpretation of the music rather than a readout
+# of the measurements.
 ANALYSIS_SYSTEM_PROMPT = (
-    "You are a music analysis engine for a generative art tool. Listen to the "
-    "provided audio and respond with ONLY a JSON object (no prose, no markdown) "
-    "with these fields: mood (one short word, e.g. 'energetic', 'calm', "
-    "'melancholic', 'triumphant'), dominant_instruments (array of up to 4 short "
-    "strings, e.g. 'drums', 'synth bass', 'lead vocal', 'strings'), "
-    "color_palette (array of exactly 4 hex color strings that visually "
-    "represent the track's mood and energy), and art_prompt (a vivid, specific "
-    "2-4 sentence description of a standalone piece of abstract generative art "
-    "that captures how THIS track actually sounds and feels -- its own shapes, "
-    "composition, textures, and color treatment. Make it distinct: invent "
-    "concrete visual details tied to what you hear (e.g. specific forms, "
-    "materials, lighting, motion) rather than generic mood words, so that a "
-    "different-sounding track would clearly get a different description)."
+    "You are a painter with synesthesia: when you hear music, you see it. "
+    "Listen closely to the provided track and describe the artwork it becomes "
+    "in your mind. Let the music lead -- its breath, grain, swells, silences, "
+    "and the way sounds move against each other. Favor organic, living "
+    "qualities: things that grow, flow, drift, erode, bloom, tangle, or "
+    "dissolve, and textures with a natural or handmade feel. Any medium, "
+    "scale, or degree of abstraction is fine if it fits what you hear; every "
+    "track should feel like its own world.\n\n"
+    "You'll also be given a few rough measurements of the track. Treat them "
+    "as background, not instructions -- trust your ears where they disagree, "
+    "and never mention numbers, BPM, keys, or music theory in the art "
+    "direction.\n\n"
+    "The listener may also describe the track in their own words -- what it "
+    "means to them, what they picture, the feeling they want captured. When "
+    "they do, let it lead: their story, imagery, and emotional reading should "
+    "shape the mood, palette, and artwork, while what you hear decides how it "
+    "is rendered (texture, motion, energy). Weave their ideas in as an artist "
+    "would rather than illustrating them word for word. Instruments are "
+    "still whatever you actually hear.\n\n"
+    "Respond with ONLY a JSON object (no prose, no markdown) with these "
+    "fields: mood (a short phrase in your own words), dominant_instruments "
+    "(array of up to 4 short strings), color_palette (array of 3-6 hex color "
+    "strings drawn from the colors you imagine), and art_prompt (a rich, "
+    "sensory description of the artwork, a short paragraph, written for an "
+    "image model)."
 )
 
-IMAGE_STYLE_SUFFIX = (
-    " The image itself must be abstract generative art only: no text, no "
-    "letters, no words, no watermarks, no photographic people or faces. "
-    "Square composition, full-bleed, gallery quality."
-)
+IMAGE_STYLE_SUFFIX = " No text, lettering, signatures, or watermarks."
+
+
+def _describe_dsp(dsp):
+    """Plain-language summary of the DSP measurements, used only as background
+    context for GPT -- it never goes straight into the image prompt."""
+
+    def level(value, low, high):
+        if value is None:
+            return "unknown"
+        return low if value < 0.35 else high if value > 0.65 else "moderate"
+
+    sections = dsp.get("sections") or []
+    return (
+        f"Tempo around {dsp.get('tempo_bpm', '?')} BPM; "
+        f"key of {dsp.get('key', '?')}; "
+        f"{len(sections)} distinct sections over {dsp.get('duration_sec', '?')} seconds; "
+        f"energy {level(dsp.get('energy'), 'low', 'high')}; "
+        f"tone {level(dsp.get('brightness'), 'dark/warm', 'bright')}; "
+        f"rhythm {level(dsp.get('rhythm_density'), 'sparse', 'busy')}; "
+        f"dynamics {level(dsp.get('dynamic_range'), 'steady', 'wide-swinging')}; "
+        f"harmony {level(dsp.get('harmonic_tension'), 'settled', 'tense')}."
+    )
 
 
 def _parse_json_response(raw_content):
@@ -229,23 +287,31 @@ def _parse_json_response(raw_content):
     return json.loads(raw_content)
 
 
-def _get_gpt_analysis(audio_bytes, audio_format):
-    """Qualitative pass via GPT: mood, instruments, palette. Returns {} on failure
-    so the page can still render DSP-only art rather than failing outright."""
+def _get_gpt_analysis(audio_bytes, audio_format, dsp, description=""):
+    """Qualitative pass via GPT: mood, instruments, palette, art direction.
+    Returns {} on failure so the page can still render DSP-only art rather
+    than failing outright."""
     if openai_client is None:
         return {}, "OPENAI_API_KEY is not configured on the server, so mood/instrument/color analysis was skipped."
 
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+    user_text = f"Rough measurements: {_describe_dsp(dsp)}"
+    if description:
+        user_text += f"\n\nThe listener describes this track: {description}"
+    user_text += "\n\nListen, then return the JSON object."
     try:
         completion = openai_client.chat.completions.create(
-            model="gpt-audio",
+            model=AUDIO_MODEL,
             modalities=["text"],
             messages=[
                 {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Analyze this track and return the JSON object described."},
+                        {
+                            "type": "text",
+                            "text": user_text,
+                        },
                         {"type": "input_audio", "input_audio": {"data": audio_b64, "format": audio_format}},
                     ],
                 },
@@ -256,108 +322,342 @@ def _get_gpt_analysis(audio_bytes, audio_format):
         return {}, f"GPT mood/instrument analysis failed ({exc}); showing DSP-only art."
 
 
-def _build_image_prompt(dsp, gpt):
-    """Ground GPT's freeform art_prompt with a few hard facts from the DSP
-    pass and the measured color palette, so the generated image still traces
-    back to the actual track rather than being pure GPT improvisation."""
+def _build_image_prompt(dsp, gpt, description=""):
+    """GPT's art direction already folds in what the DSP measured, so it's
+    passed through as-is; only a no-text guard is added."""
     art_prompt = (gpt.get("art_prompt") or "").strip()
     if not art_prompt:
-        mood = gpt.get("mood", "neutral")
-        art_prompt = f"An abstract piece of generative art capturing a {mood}-sounding track."
-
-    palette = [c for c in (gpt.get("color_palette") or []) if isinstance(c, str) and c.startswith("#")]
-    facts = [
-        f"tempo {dsp.get('tempo_bpm', '?')} BPM",
-        f"key {dsp.get('key', '?')}",
-        f"{'high' if dsp.get('energy', 0.5) > 0.6 else 'low' if dsp.get('energy', 0.5) < 0.4 else 'moderate'} loudness",
-        f"{dsp.get('section_count', len(dsp.get('sections', [])))} structural sections",
-    ]
-    if palette:
-        facts.append("color palette of " + ", ".join(palette))
-
-    return f"{art_prompt} Ground the piece in these real measurements from the track: {'; '.join(facts)}.{IMAGE_STYLE_SUFFIX}"
+        mood = gpt.get("mood", "an unnamed feeling")
+        art_prompt = (
+            f"An organic, flowing artwork that feels like music with the mood of {mood}. "
+            f"The sound is described as: {_describe_dsp(dsp)} Translate this into "
+            "texture, movement, and color rather than literal imagery."
+        )
+        if description:
+            art_prompt += f" The listener describes the music as: {description}"
+    return f"{art_prompt}{IMAGE_STYLE_SUFFIX}"
 
 
-def _generate_artwork_image(dsp, gpt):
+def _generate_artwork_image(dsp, gpt, description=""):
     """Full image-generation pass: turns the track's analysis into a genuinely
     new piece of art per song (new composition, shapes, and colors each time)
     rather than recombining a fixed set of procedural shapes. Returns
-    (data_uri, warning) -- data_uri is None on failure so the caller can fall
-    back to the deterministic procedural SVG."""
+    (png_bytes, warning) -- png_bytes is None on failure so the caller can
+    fall back to the deterministic procedural SVG."""
     if openai_client is None:
         return None, "OPENAI_API_KEY is not configured on the server, so image generation was skipped."
 
-    prompt = _build_image_prompt(dsp, gpt)
+    prompt = _build_image_prompt(dsp, gpt, description)
     try:
-        response = openai_client.images.generate(model="gpt-image-1", prompt=prompt, size="1024x1024")
-        b64_data = response.data[0].b64_json
-        return f"data:image/png;base64,{b64_data}", None
+        response = openai_client.images.generate(
+            model=IMAGE_MODEL, prompt=prompt, size="1024x1024", quality=IMAGE_QUALITY
+        )
+        return base64.b64decode(response.data[0].b64_json), None
     except Exception as exc:  # noqa: BLE001 - degrade gracefully, procedural art still works
         return None, f"Image generation failed ({exc}); showing procedural art instead."
+
+
+EDIT_TEXT_PROMPT = (
+    "Edit this artwork as follows: {instruction}\n\n"
+    "Change only what the instruction asks for. Keep the rest of the piece -- "
+    "composition, palette, brushwork, texture, and lighting -- as close to the "
+    "original as possible, and render any new elements in the same style so "
+    "they look like they were always part of it."
+)
+
+EDIT_SKETCH_PROMPT = (
+    "The first image is an artwork that the user has drawn rough marks on to "
+    "request an edit; the second image is the same artwork before the marks. "
+    "Every mark is a request to ADD or CHANGE something at that spot -- never "
+    "noise to clean up. Work out what each mark depicts from its shape, size, "
+    "color, and placement (a circle might be a sun, moon, or orb; small V "
+    "shapes might be birds; a line might be a horizon, path, or crack of "
+    "light) and paint that as a clearly visible, finished element in the "
+    "artwork's existing style, palette, and texture, at the same position and "
+    "roughly the same size as the mark. The new elements must be obvious when "
+    "comparing the result to the second image. Outside the marked areas, keep "
+    "the artwork as it is. The rough strokes themselves should be replaced by "
+    "the painted elements, not left as flat lines."
+)
+
+MAX_VERSIONS = 20
+MAX_SKETCH_BYTES = 12 * 1024 * 1024
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _edit_artwork_image(images, prompt):
+    """images: list of PNG bytes (first is the one being edited). Returns
+    (png_bytes, error_message)."""
+    if openai_client is None:
+        return None, "OPENAI_API_KEY is not configured on the server, so editing is unavailable."
+    try:
+        response = openai_client.images.edit(
+            model=IMAGE_MODEL,
+            quality=IMAGE_QUALITY,
+            image=[(f"image{i}.png", png, "image/png") for i, png in enumerate(images)],
+            prompt=f"{prompt}{IMAGE_STYLE_SUFFIX}",
+            size="1024x1024",
+        )
+        return base64.b64decode(response.data[0].b64_json), None
+    except Exception as exc:  # noqa: BLE001 - report the failure to the editor UI
+        return None, f"Image edit failed ({exc})."
+
+
+def _run_pipeline(audio_bytes, audio_format, description="", report=lambda stage: None):
+    """DSP -> GPT listening pass -> image generation. Calls report(stage) as
+    each step starts so the browser can show live progress. Raises ValueError
+    if the audio itself can't be analyzed; GPT/image failures degrade into
+    warnings instead."""
+    warnings = []
+
+    report("measuring")
+    try:
+        dsp = analyze_audio(audio_bytes, audio_format)
+    except Exception as exc:  # noqa: BLE001 - surface DSP failures (corrupt/short file, etc.)
+        raise ValueError(f"Audio analysis failed: {exc}") from exc
+
+    report("listening")
+    gpt, gpt_warning = _get_gpt_analysis(audio_bytes, audio_format, dsp, description)
+    if gpt_warning:
+        warnings.append(gpt_warning)
+
+    analysis = {
+        "tempo_bpm": dsp["tempo_bpm"],
+        "duration_sec": dsp["duration_sec"],
+        "key": dsp["key"],
+        "mode": dsp["mode"],
+        "energy": dsp["energy"],
+        "brightness": dsp["brightness"],
+        "rhythm_density": dsp["rhythm_density"],
+        "dynamic_range": dsp["dynamic_range"],
+        "harmonic_tension": dsp["harmonic_tension"],
+        "timbre_sharpness": dsp["timbre_sharpness"],
+        "is_stereo": dsp["is_stereo"],
+        "section_count": len(dsp["sections"]),
+        "note_event_count": len(dsp["note_events"]),
+        "mood": gpt.get("mood", "unknown"),
+        "dominant_instruments": gpt.get("dominant_instruments", []),
+        "description": description,
+    }
+
+    report("generating")
+    artwork_png, image_warning = _generate_artwork_image(dsp, gpt, description)
+    artwork_svg = None
+    if artwork_png is None:
+        if image_warning:
+            warnings.append(image_warning)
+        artwork_svg = generate_svg(dsp, gpt)
+
+    return {
+        "analysis": analysis,
+        "artwork_png": artwork_png,
+        "artwork_svg": artwork_svg,
+        "artwork_description": gpt.get("art_prompt"),
+        "warnings": warnings,
+    }
+
+
+# In-memory job store for background analyses. Fine for a single dev-server
+# process; a multi-worker deployment would need Redis or the database instead.
+JOB_TTL_SEC = 60 * 60
+_jobs = {}
+_jobs_lock = threading.Lock()
+
+
+def _prune_jobs():
+    cutoff = time.time() - JOB_TTL_SEC
+    with _jobs_lock:
+        for job_id in [j for j, job in _jobs.items() if job["created"] < cutoff]:
+            del _jobs[job_id]
+
+
+def _get_job_or_404(job_id):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None or job["user_id"] != session.get("user_id"):
+        abort(404)
+    return job
+
+
+def _run_job(job_id, audio_bytes, audio_format, description):
+    def report(stage):
+        with _jobs_lock:
+            _jobs[job_id]["stage"] = stage
+
+    try:
+        result = _run_pipeline(audio_bytes, audio_format, description, report)
+        # Each edit appends a version; version 0 is the original artwork.
+        artwork_png = result.pop("artwork_png")
+        versions = [{"png": artwork_png, "label": "Original"}] if artwork_png else []
+        with _jobs_lock:
+            _jobs[job_id].update(stage="done", result=result, versions=versions)
+    except Exception as exc:  # noqa: BLE001 - report any failure back to the browser
+        with _jobs_lock:
+            _jobs[job_id].update(stage="error", error=str(exc))
+
+
+MAX_DESCRIPTION_CHARS = 1000
+
+
+def _read_upload():
+    """Returns (audio_bytes, audio_format, description, error_message)."""
+    description = (request.form.get("description") or "").strip()[:MAX_DESCRIPTION_CHARS]
+    file = request.files.get("music_file")
+    if not file or file.filename == "":
+        return None, None, description, "Please choose an audio file."
+    if not allowed_audio_file(file.filename):
+        return None, None, description, "Only .mp3 and .wav files are supported."
+    return file.read(), file.filename.rsplit(".", 1)[1].lower(), description, None
+
+
+def _render_analyze(result=None, artwork_image=None, job_id=None, versions=None):
+    result = result or {}
+    return render_template(
+        "analyze.html",
+        job_id=job_id,
+        versions=versions or [],
+        analysis=result.get("analysis"),
+        artwork_svg=result.get("artwork_svg"),
+        artwork_image=artwork_image,
+        artwork_description=result.get("artwork_description"),
+        warnings=result.get("warnings", []),
+    )
 
 
 @app.route("/analyze", methods=["GET", "POST"])
 @login_required
 def analyze():
-    analysis = None
-    artwork_svg = None
-    artwork_image = None
-    artwork_description = None
+    # Finished background job (the page's JS swaps this in without a reload).
+    job_id = request.args.get("job")
+    if job_id:
+        job = _get_job_or_404(job_id)
+        if job["stage"] != "done":
+            return redirect(url_for("analyze"))
+        versions = [
+            {"label": v["label"], "url": url_for("analyze_image", job_id=job_id, version=i)}
+            for i, v in enumerate(job["versions"])
+        ]
+        image_url = versions[-1]["url"] if versions else None
+        return _render_analyze(job["result"], image_url, job_id, versions)
 
-    if request.method == "POST":
-        file = request.files.get("music_file")
-        if not file or file.filename == "":
-            flash("Please choose an audio file.", "error")
-            return render_template("analyze.html", analysis=None, artwork_svg=None, artwork_image=None, artwork_description=None)
+    if request.method == "GET":
+        return _render_analyze()
 
-        if not allowed_audio_file(file.filename):
-            flash("Only .mp3 and .wav files are supported.", "error")
-            return render_template("analyze.html", analysis=None, artwork_svg=None, artwork_image=None, artwork_description=None)
+    # Plain form POST: only reached when JavaScript is off, so run inline.
+    audio_bytes, audio_format, description, error = _read_upload()
+    if error:
+        flash(error, "error")
+        return _render_analyze()
+    try:
+        result = _run_pipeline(audio_bytes, audio_format, description)
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return _render_analyze()
+    image_uri = None
+    if result["artwork_png"]:
+        image_uri = "data:image/png;base64," + base64.b64encode(result["artwork_png"]).decode("ascii")
+    return _render_analyze(result, image_uri)
 
-        audio_format = file.filename.rsplit(".", 1)[1].lower()
-        audio_bytes = file.read()
 
-        try:
-            dsp = analyze_audio(audio_bytes, audio_format)
-        except Exception as exc:  # noqa: BLE001 - surface DSP failures (corrupt/short file, etc.)
-            flash(f"Audio analysis failed: {exc}", "error")
-            return render_template("analyze.html", analysis=None, artwork_svg=None, artwork_image=None, artwork_description=None)
+@app.route("/analyze/start", methods=["POST"])
+@login_required
+def analyze_start():
+    audio_bytes, audio_format, description, error = _read_upload()
+    if error:
+        return jsonify(error=error), 400
 
-        gpt, gpt_warning = _get_gpt_analysis(audio_bytes, audio_format)
-        if gpt_warning:
-            flash(gpt_warning, "error")
-
-        analysis = {
-            "tempo_bpm": dsp["tempo_bpm"],
-            "duration_sec": dsp["duration_sec"],
-            "key": dsp["key"],
-            "mode": dsp["mode"],
-            "energy": dsp["energy"],
-            "brightness": dsp["brightness"],
-            "rhythm_density": dsp["rhythm_density"],
-            "dynamic_range": dsp["dynamic_range"],
-            "harmonic_tension": dsp["harmonic_tension"],
-            "timbre_sharpness": dsp["timbre_sharpness"],
-            "is_stereo": dsp["is_stereo"],
-            "section_count": len(dsp["sections"]),
-            "note_event_count": len(dsp["note_events"]),
-            "mood": gpt.get("mood", "unknown"),
-            "dominant_instruments": gpt.get("dominant_instruments", []),
+    _prune_jobs()
+    job_id = uuid.uuid4().hex
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "user_id": session["user_id"],
+            "stage": "queued",
+            "created": time.time(),
+            "result": None,
+            "error": None,
         }
+    threading.Thread(target=_run_job, args=(job_id, audio_bytes, audio_format, description), daemon=True).start()
+    return jsonify(job_id=job_id), 202
 
-        artwork_image, image_warning = _generate_artwork_image(dsp, gpt)
-        if artwork_image is None:
-            if image_warning:
-                flash(image_warning, "error")
-            artwork_svg = generate_svg(dsp, gpt)
-        artwork_description = gpt.get("art_prompt")
 
-    return render_template(
-        "analyze.html",
-        analysis=analysis,
-        artwork_svg=artwork_svg,
-        artwork_image=artwork_image,
-        artwork_description=artwork_description,
+@app.route("/analyze/status/<job_id>")
+@login_required
+def analyze_status(job_id):
+    job = _get_job_or_404(job_id)
+    return jsonify(stage=job["stage"], error=job["error"], has_image=bool(job.get("versions")))
+
+
+@app.route("/analyze/image/<job_id>/<int:version>.png")
+@login_required
+def analyze_image(job_id, version):
+    job = _get_job_or_404(job_id)
+    versions = job.get("versions") or []
+    if version >= len(versions):
+        abort(404)
+    return app.response_class(versions[version]["png"], mimetype="image/png")
+
+
+@app.route("/analyze/edit/<job_id>", methods=["POST"])
+@login_required
+def analyze_edit(job_id):
+    """Two ways to edit: mode=text (a written instruction) or mode=sketch (the
+    browser sends the artwork with the user's marks flattened onto it, plus an
+    optional note on what the marks should become)."""
+    job = _get_job_or_404(job_id)
+    versions = job.get("versions") or []
+    if not versions:
+        return jsonify(error="This artwork can't be edited."), 400
+    if len(versions) >= MAX_VERSIONS:
+        return jsonify(error=f"You've reached the limit of {MAX_VERSIONS - 1} edits for this artwork."), 400
+
+    try:
+        base_version = int(request.form.get("base_version", len(versions) - 1))
+    except ValueError:
+        base_version = -1
+    if not 0 <= base_version < len(versions):
+        return jsonify(error="Unknown version to edit."), 400
+    base_png = versions[base_version]["png"]
+
+    mode = request.form.get("mode")
+    note = (request.form.get("prompt") or "").strip()[:1000]
+    if mode == "text":
+        if not note:
+            return jsonify(error="Describe the change you'd like to make."), 400
+        images = [base_png]
+        prompt = EDIT_TEXT_PROMPT.format(instruction=note)
+        label = note
+    elif mode == "sketch":
+        sketch = request.files.get("sketch")
+        sketch_png = sketch.read(MAX_SKETCH_BYTES + 1) if sketch else b""
+        if not sketch_png.startswith(PNG_SIGNATURE) or len(sketch_png) > MAX_SKETCH_BYTES:
+            return jsonify(error="Draw on the artwork first."), 400
+        images = [sketch_png, base_png]
+        prompt = EDIT_SKETCH_PROMPT
+        if note:
+            prompt += f"\n\nThe user describes what the marks should become: {note}"
+        label = f"Sketch: {note}" if note else "Sketch edit"
+    else:
+        return jsonify(error="Unknown edit mode."), 400
+
+    with _jobs_lock:
+        if job.get("editing"):
+            return jsonify(error="An edit is already in progress."), 409
+        job["editing"] = True
+    try:
+        edited_png, error = _edit_artwork_image(images, prompt)
+    finally:
+        with _jobs_lock:
+            job["editing"] = False
+    if error:
+        return jsonify(error=error), 502
+
+    with _jobs_lock:
+        versions.append({"png": edited_png, "label": label})
+        version = len(versions) - 1
+    return jsonify(
+        version=version,
+        label=label,
+        url=url_for("analyze_image", job_id=job_id, version=version),
     )
 
 

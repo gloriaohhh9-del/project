@@ -24,13 +24,14 @@
   </nav>
 
   {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-      <div class="flash-container">
-        {% for category, message in messages %}
-          <div class="flash flash-{{ category }}">{{ message }}</div>
-        {% endfor %}
-      </div>
-    {% endif %}
+    <div class="flash-container" id="flash-container">
+      {% for category, message in messages %}
+        <div class="flash flash-{{ category }}">{{ message }}</div>
+      {% endfor %}
+      {% for message in warnings or [] %}
+        <div class="flash flash-error">{{ message }}</div>
+      {% endfor %}
+    </div>
   {% endwith %}
 
   <main class="analyze-main">
@@ -42,7 +43,10 @@
         both into a piece of generative art.
       </p>
 
-      <form class="auth-form" method="post" enctype="multipart/form-data">
+      <form class="auth-form" id="analyze-form" method="post" enctype="multipart/form-data"
+            data-start-url="{{ url_for('analyze_start') }}"
+            data-status-url="{{ url_for('analyze_status', job_id='JOB_ID') }}"
+            data-result-url="{{ url_for('analyze', job='JOB_ID') }}">
         <div class="form-group">
           <label for="music_file">Music file (.mp3 or .wav)</label>
           <input
@@ -54,9 +58,40 @@
           >
         </div>
 
-        <button type="submit" class="btn-primary">Analyze &amp; Generate Art</button>
+        <div class="form-group">
+          <label for="description">Describe the music <span class="optional">(optional)</span></label>
+          <textarea
+            id="description"
+            name="description"
+            rows="3"
+            maxlength="1000"
+            placeholder="What does it mean to you, or what do you see when you hear it? e.g. a late drive home after a breakup, city lights blurring in the rain"
+          ></textarea>
+          <span class="form-hint">Leads ChatGPT's interpretation: your story and imagery shape the artwork, while the sound shapes its texture and energy.</span>
+        </div>
+
+        <button type="submit" class="btn-primary" id="analyze-submit">Analyze &amp; Generate Art</button>
       </form>
 
+      <section class="progress-panel" id="progress-panel" hidden aria-live="polite">
+        <div class="progress-header">
+          <span class="progress-status" id="progress-status">Starting…</span>
+          <span class="progress-elapsed" id="progress-elapsed"></span>
+        </div>
+        <ol class="progress-steps">
+          <li data-stage="upload">Uploading track <span class="step-detail" id="upload-percent"></span></li>
+          <li data-stage="measuring">Measuring tempo, key &amp; energy</li>
+          <li data-stage="listening">ChatGPT is listening</li>
+          <li data-stage="generating">Generating artwork</li>
+          <li data-stage="loading">Loading image</li>
+          <li data-stage="done">Completed</li>
+        </ol>
+        <div class="artwork-placeholder" id="artwork-placeholder" hidden>
+          <span>Painting your track…</span>
+        </div>
+      </section>
+
+      <div id="analysis-output">
       {% if analysis %}
         <div class="analysis-result">
           <h2>Analysis</h2>
@@ -64,6 +99,9 @@
             <li><strong>Tempo:</strong> {{ analysis.tempo_bpm }} BPM</li>
             <li><strong>Key:</strong> {{ analysis.key }}</li>
             <li><strong>Duration:</strong> {{ analysis.duration_sec }}s ({{ "Stereo" if analysis.is_stereo else "Mono" }})</li>
+            {% if analysis.description %}
+              <li><strong>Your description:</strong> {{ analysis.description }}</li>
+            {% endif %}
             <li><strong>Mood:</strong> {{ analysis.mood }}</li>
             <li><strong>Loudness:</strong> {{ (analysis.energy * 100) | round | int }}%</li>
             <li><strong>Dynamic range:</strong> {{ (analysis.dynamic_range * 100) | round | int }}%</li>
@@ -80,23 +118,78 @@
           <p class="analysis-footnote">
             Tempo, key, loudness, dynamics, rhythm, harmony, timbre, structure, and stereo
             position are all measured directly from the audio signal. Mood and instrumentation
-            are ChatGPT's interpretation.
+            are ChatGPT's interpretation{% if analysis.description %}, guided by your description{% endif %}.
           </p>
         </div>
 
-        <div class="artwork-frame">
+        <div class="artwork-frame" id="artwork-frame">
           {% if artwork_image %}
-            <img src="{{ artwork_image }}" alt="Generated artwork" class="artwork-image">
+            <img src="{{ artwork_image }}" alt="Generated artwork" class="artwork-image" id="artwork-image">
           {% else %}
             {{ artwork_svg | safe }}
           {% endif %}
         </div>
+
+        {% if job_id and artwork_image %}
+          <section class="artwork-editor" id="artwork-editor"
+                   data-edit-url="{{ url_for('analyze_edit', job_id=job_id) }}">
+            <div class="editor-header">
+              <h2>Edit artwork</h2>
+              <a class="action-btn" id="editor-download" href="{{ artwork_image }}" download="aura-artwork.png">⬇️ Save</a>
+            </div>
+
+            <div class="editor-tabs" role="tablist">
+              <button type="button" class="editor-tab is-active" role="tab" data-mode="text" aria-selected="true">✍️ Describe</button>
+              <button type="button" class="editor-tab" role="tab" data-mode="sketch" aria-selected="false">🖌️ Sketch</button>
+            </div>
+
+            <form class="editor-panel" id="editor-text" data-mode="text">
+              <label for="edit-text-prompt">Describe the change</label>
+              <textarea id="edit-text-prompt" name="prompt" rows="3" maxlength="1000"
+                        placeholder="e.g. Add a pale moon in the upper right, or make the palette warmer"></textarea>
+              <button type="submit" class="btn-primary">Apply edit</button>
+            </form>
+
+            <div class="editor-panel" id="editor-sketch" data-mode="sketch" hidden>
+              <p class="editor-hint">
+                Open this version in Draw and sketch on top of it with the drawing tools —
+                your marks show where and what to change, and get repainted in the artwork's style.
+              </p>
+              <a class="btn-primary editor-draw-link" id="editor-draw-link"
+                 data-url-template="{{ url_for('draw', job=job_id, version='VERSION') }}"
+                 href="{{ url_for('draw', job=job_id, version=versions|length - 1) }}">🖌️ Open in Draw</a>
+            </div>
+
+            <div class="editor-status" id="editor-status" hidden aria-live="polite">
+              <span class="editor-status-text" id="editor-status-text"></span>
+              <span class="progress-elapsed" id="editor-elapsed"></span>
+            </div>
+
+            <div class="version-strip-wrap">
+              <span class="version-strip-label">Versions</span>
+              <ol class="version-strip" id="version-strip">
+                {% for v in versions %}
+                  <li>
+                    <button type="button" class="version-thumb{% if loop.last %} is-active{% endif %}"
+                            data-version="{{ loop.index0 }}" data-url="{{ v.url }}" title="{{ v.label }}">
+                      <img src="{{ v.url }}" alt="{{ v.label }}" loading="lazy">
+                      <span>{{ "Original" if loop.first else "Edit " ~ loop.index0 }}</span>
+                    </button>
+                  </li>
+                {% endfor %}
+              </ol>
+            </div>
+          </section>
+        {% endif %}
         {% if artwork_description %}
           <p class="artwork-description">{{ artwork_description }}</p>
         {% endif %}
       {% endif %}
+      </div>
     </div>
   </main>
 
+  <script src="{{ url_for('static', filename='js/artwork-editor.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/analyze.js') }}"></script>
 </body>
 </html>

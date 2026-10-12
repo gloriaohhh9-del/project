@@ -2,8 +2,12 @@
   const canvasStack = document.getElementById("canvasStack");
   if (!canvasStack) return;
 
-  const CANVAS_WIDTH = 1200;
-  const CANVAS_HEIGHT = 675;
+  // Default canvas size; replaced by the artwork's own size when the page is
+  // opened from Analyze to sketch an edit (see "Sketch edit mode" below).
+  let CANVAS_WIDTH = 1200;
+  let CANVAS_HEIGHT = 675;
+  const editSource = canvasStack.dataset.backgroundUrl ? canvasStack.dataset : null;
+  let sketchDirty = false;
 
   const colorPicker = document.getElementById("colorPicker");
   const sizeSlider = document.getElementById("sizeSlider");
@@ -46,7 +50,7 @@
 
   // --- Layer management ---
 
-  function createLayer(name) {
+  function createLayer(name, options) {
     layerCounter += 1;
     const layerCanvas = document.createElement("canvas");
     layerCanvas.width = CANVAS_WIDTH;
@@ -58,6 +62,7 @@
       canvas: layerCanvas,
       ctx: layerCanvas.getContext("2d"),
       visible: true,
+      locked: Boolean(options && options.locked),
     };
     layers.push(layer);
     canvasStack.appendChild(layerCanvas);
@@ -112,7 +117,13 @@
       li.appendChild(visBtn);
       li.appendChild(nameSpan);
 
-      if (layers.length > 1) {
+      if (layer.locked) {
+        const lockIcon = document.createElement("span");
+        lockIcon.className = "layer-lock";
+        lockIcon.title = "Locked";
+        lockIcon.textContent = "🔒";
+        li.appendChild(lockIcon);
+      } else if (layers.length > 1) {
         const delBtn = document.createElement("button");
         delBtn.type = "button";
         delBtn.className = "layer-delete";
@@ -129,7 +140,7 @@
   function deleteLayer(id) {
     if (layers.length <= 1) return;
     const index = layers.findIndex((l) => l.id === id);
-    if (index === -1) return;
+    if (index === -1 || layers[index].locked) return;
     const [removed] = layers.splice(index, 1);
     removed.canvas.remove();
     if (activeLayerId === id) {
@@ -307,8 +318,16 @@
     }
   }
 
+  function markSketchDirty() {
+    sketchDirty = true;
+    const submit = document.getElementById("sketchEditSubmit");
+    if (submit) submit.disabled = false;
+  }
+
   function beginStroke(event) {
+    if (getActiveLayer().locked) return;
     drawing = true;
+    markSketchDirty();
     pushUndoState();
     const pos = getPos(event);
     lastX = startX = pos.x;
@@ -369,8 +388,9 @@
   redoBtn.addEventListener("click", redo);
 
   clearBtn.addEventListener("click", () => {
-    pushUndoState();
     const layer = getActiveLayer();
+    if (layer.locked) return;
+    pushUndoState();
     layer.ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
   });
 
@@ -402,7 +422,9 @@
     reader.onload = (loadEvent) => {
       const img = new Image();
       img.onload = () => {
+        if (getActiveLayer().locked) return;
         pushUndoState();
+        markSketchDirty();
         const ctx = getActiveLayer().ctx;
         const scale = Math.min(CANVAS_WIDTH / img.width, CANVAS_HEIGHT / img.height, 1);
         const drawW = img.width * scale;
@@ -440,9 +462,95 @@
     }
   });
 
+  // --- Sketch edit mode (opened from an Analyze result) ---
+
+  function flattenForEdit() {
+    const out = document.createElement("canvas");
+    out.width = CANVAS_WIDTH;
+    out.height = CANVAS_HEIGHT;
+    const octx = out.getContext("2d");
+    octx.fillStyle = "#ffffff";
+    octx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    // The artwork layer is always included, even if hidden while sketching.
+    layers.forEach((layer) => {
+      if (layer.visible || layer.locked) octx.drawImage(layer.canvas, 0, 0);
+    });
+    return new Promise((resolve) => out.toBlob(resolve, "image/png"));
+  }
+
+  function initSketchEdit() {
+    const form = document.getElementById("sketchEditBar");
+    const promptInput = document.getElementById("sketchEditPrompt");
+    const submit = document.getElementById("sketchEditSubmit");
+    const status = document.getElementById("sketchEditStatus");
+    const statusText = document.getElementById("sketchEditStatusText");
+    const elapsed = document.getElementById("sketchEditElapsed");
+
+    function setStatus(text, state) {
+      status.hidden = false;
+      status.className = "editor-status" + (state ? " is-" + state : "");
+      statusText.textContent = text;
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!sketchDirty || submit.disabled) return;
+
+      submit.disabled = true;
+      promptInput.disabled = true;
+      canvasStack.classList.add("is-busy");
+      const t0 = Date.now();
+      elapsed.textContent = "0s";
+      const timer = setInterval(() => (elapsed.textContent = Math.round((Date.now() - t0) / 1000) + "s"), 1000);
+      setStatus("Turning your sketch into an edit…", "busy");
+
+      try {
+        const formData = new FormData();
+        formData.append("mode", "sketch");
+        formData.append("prompt", promptInput.value.trim());
+        formData.append("base_version", editSource.baseVersion);
+        formData.append("sketch", await flattenForEdit(), "sketch.png");
+
+        const res = await fetch(editSource.editUrl, { method: "POST", body: formData });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || !body.url) throw new Error(body.error || "Edit failed (" + res.status + ").");
+
+        setStatus("Edit applied ✓ Taking you back to your artwork…", "done");
+        window.location.href = editSource.backUrl;
+      } catch (err) {
+        setStatus(err.message, "error");
+        submit.disabled = false;
+        promptInput.disabled = false;
+        canvasStack.classList.remove("is-busy");
+      } finally {
+        clearInterval(timer);
+      }
+    });
+  }
+
   // --- Init ---
 
-  const firstLayer = createLayer();
-  setActiveLayer(firstLayer.id);
-  updateHistoryButtons();
+  if (editSource) {
+    const artwork = new Image();
+    artwork.onload = () => {
+      CANVAS_WIDTH = artwork.naturalWidth;
+      CANVAS_HEIGHT = artwork.naturalHeight;
+      canvasStack.style.aspectRatio = CANVAS_WIDTH + " / " + CANVAS_HEIGHT;
+
+      const artworkLayer = createLayer("Artwork", { locked: true });
+      artworkLayer.ctx.drawImage(artwork, 0, 0);
+      const sketchLayer = createLayer("Sketch");
+      setActiveLayer(sketchLayer.id);
+      updateHistoryButtons();
+      initSketchEdit();
+    };
+    artwork.onerror = () => {
+      window.location.href = editSource.backUrl;
+    };
+    artwork.src = editSource.backgroundUrl;
+  } else {
+    const firstLayer = createLayer();
+    setActiveLayer(firstLayer.id);
+    updateHistoryButtons();
+  }
 })();

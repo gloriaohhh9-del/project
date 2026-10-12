@@ -34,6 +34,25 @@
   {% endwith %}
 
   <main class="draw-main">
+    {% if edit_source %}
+      <form class="sketch-edit-bar" id="sketchEditBar">
+        <div class="sketch-edit-intro">
+          <strong>Sketching an edit</strong>
+          <span>Draw over the artwork — your marks guide the change and get repainted in its style. The artwork layer is locked.</span>
+        </div>
+        <div class="sketch-edit-controls">
+          <input type="text" id="sketchEditPrompt" maxlength="1000"
+                 placeholder="What should your marks become? (optional)">
+          <a class="action-btn" href="{{ edit_source.back_url }}">Cancel</a>
+          <button type="submit" class="btn-primary" id="sketchEditSubmit" disabled>Apply sketch</button>
+        </div>
+        <div class="editor-status" id="sketchEditStatus" hidden aria-live="polite">
+          <span class="editor-status-text" id="sketchEditStatusText"></span>
+          <span class="progress-elapsed" id="sketchEditElapsed"></span>
+        </div>
+      </form>
+    {% endif %}
+
     <div class="draw-toolbar">
       <div class="tool-group">
         <button class="tool-btn is-active" data-tool="pencil" title="Pencil" type="button">✏️</button>
@@ -78,7 +97,13 @@
     </div>
 
     <div class="draw-workspace">
-      <div class="draw-canvas-wrap" id="canvasStack"></div>
+      <div class="draw-canvas-wrap{% if edit_source %} is-artwork{% endif %}" id="canvasStack"
+        {% if edit_source %}
+          data-background-url="{{ edit_source.image_url }}"
+          data-edit-url="{{ edit_source.edit_url }}"
+          data-back-url="{{ edit_source.back_url }}"
+          data-base-version="{{ edit_source.version }}"
+        {% endif %}></div>
 
       <aside class="layers-panel">
         <div class="layers-panel-header">

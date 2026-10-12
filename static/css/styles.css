@@ -759,6 +759,26 @@ footer a {
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
+.form-group textarea {
+  padding: 0.75rem 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.65rem;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f0f0f5;
+  font-family: inherit;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  resize: vertical;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.form-group textarea:focus {
+  outline: none;
+  border-color: rgba(167, 139, 250, 0.5);
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.15);
+}
+
+.form-group textarea::placeholder,
 .form-group input::placeholder {
   color: #606078;
 }
@@ -1126,6 +1146,468 @@ footer a {
   font-style: italic;
   line-height: 1.5;
   color: #a0a0b8;
+}
+
+.form-hint {
+  font-size: 0.78rem;
+  color: #707088;
+  line-height: 1.45;
+}
+
+.optional {
+  font-weight: 400;
+  color: #707088;
+}
+
+/* --- Analyze progress --- */
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: progress;
+  transform: none;
+}
+
+.progress-panel {
+  margin-top: 1.75rem;
+  padding: 1.25rem 1.35rem;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.progress-panel[hidden],
+.artwork-placeholder[hidden] {
+  display: none;
+}
+
+.progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.progress-status {
+  font-weight: 600;
+  color: #e8e8f0;
+}
+
+.progress-panel.is-complete .progress-status {
+  color: #67e8f9;
+}
+
+.progress-panel.is-error .progress-status {
+  color: #f472b6;
+}
+
+.progress-elapsed {
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  color: #606078;
+}
+
+.progress-steps {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.progress-steps li {
+  position: relative;
+  padding-left: 1.6rem;
+  font-size: 0.9rem;
+  color: #606078;
+  transition: color 0.3s ease;
+}
+
+/* Step marker: hollow ring (pending), spinner (active), check (done), x (failed). */
+.progress-steps li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.32em;
+  width: 0.9rem;
+  height: 0.9rem;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  box-sizing: border-box;
+}
+
+.progress-steps li.is-active {
+  color: #e8e8f0;
+}
+
+.progress-steps li.is-active::before {
+  border-color: rgba(167, 139, 250, 0.25);
+  border-top-color: #a78bfa;
+  animation: progress-spin 0.8s linear infinite;
+}
+
+.progress-steps li.is-done {
+  color: #a0a0b8;
+}
+
+.progress-steps li.is-done::before {
+  content: '✓';
+  border: none;
+  background: linear-gradient(135deg, #a78bfa, #67e8f9);
+  color: #08080f;
+  font-size: 0.6rem;
+  font-weight: 700;
+  line-height: 0.9rem;
+  text-align: center;
+}
+
+.progress-steps li.is-failed {
+  color: #f472b6;
+}
+
+.progress-steps li.is-failed::before {
+  content: '✕';
+  border: none;
+  background: #f472b6;
+  color: #08080f;
+  font-size: 0.6rem;
+  font-weight: 700;
+  line-height: 0.9rem;
+  text-align: center;
+}
+
+.step-detail {
+  margin-left: 0.35rem;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  color: #a78bfa;
+}
+
+.artwork-placeholder {
+  margin-top: 1.25rem;
+  aspect-ratio: 1 / 1;
+  border-radius: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(110deg, transparent 30%, rgba(255, 255, 255, 0.06) 50%, transparent 70%),
+    radial-gradient(circle at 30% 30%, rgba(167, 139, 250, 0.22), transparent 60%),
+    radial-gradient(circle at 70% 70%, rgba(103, 232, 249, 0.18), transparent 60%),
+    radial-gradient(circle at 75% 25%, rgba(244, 114, 182, 0.12), transparent 55%),
+    #0d0d18;
+  background-size: 250% 100%, 100% 100%, 100% 100%, 100% 100%, auto;
+  animation: progress-shimmer 2.2s ease-in-out infinite;
+}
+
+.artwork-placeholder span {
+  font-size: 0.85rem;
+  color: #a0a0b8;
+  animation: progress-pulse 2.2s ease-in-out infinite;
+}
+
+@keyframes progress-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes progress-shimmer {
+  from { background-position: 150% 0, 0 0, 0 0, 0 0, 0 0; }
+  to { background-position: -50% 0, 0 0, 0 0, 0 0, 0 0; }
+}
+
+@keyframes progress-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-steps li.is-active::before,
+  .artwork-placeholder,
+  .artwork-placeholder span {
+    animation: none;
+  }
+}
+
+/* --- Artwork editor (Analyze results) --- */
+.artwork-editor {
+  margin-top: 1.5rem;
+  padding: 1.25rem 1.35rem;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.editor-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.editor-header h2 {
+  font-size: 1.1rem;
+}
+
+.editor-header .action-btn {
+  text-decoration: none;
+}
+
+.editor-tabs {
+  display: flex;
+  gap: 0.35rem;
+  padding: 0.25rem;
+  margin-bottom: 1rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.editor-tab {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  color: #9090a8;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.editor-tab:hover {
+  color: #e8e8f0;
+}
+
+.editor-tab.is-active {
+  background: rgba(167, 139, 250, 0.18);
+  color: #f0f0f5;
+}
+
+.editor-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.editor-panel[hidden] {
+  display: none;
+}
+
+.editor-panel label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #e8e8f0;
+}
+
+.editor-panel textarea,
+.sketch-edit-controls input {
+  padding: 0.75rem 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.65rem;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f0f0f5;
+  font-family: inherit;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  resize: vertical;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.editor-panel textarea::placeholder,
+.sketch-edit-controls input::placeholder {
+  color: #606078;
+}
+
+.editor-panel textarea:focus,
+.sketch-edit-controls input:focus {
+  outline: none;
+  border-color: rgba(167, 139, 250, 0.5);
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.15);
+}
+
+.editor-hint {
+  font-size: 0.875rem;
+  color: #a0a0b8;
+  line-height: 1.55;
+}
+
+.editor-draw-link {
+  display: inline-block;
+  text-align: center;
+  text-decoration: none;
+}
+
+.editor-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 0.85rem;
+  font-size: 0.875rem;
+  color: #e8e8f0;
+}
+
+.editor-status[hidden] {
+  display: none;
+}
+
+.editor-status-text {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.editor-status.is-busy .editor-status-text::before {
+  content: '';
+  width: 0.9rem;
+  height: 0.9rem;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(167, 139, 250, 0.25);
+  border-top-color: #a78bfa;
+  animation: progress-spin 0.8s linear infinite;
+}
+
+.editor-status.is-done {
+  color: #67e8f9;
+}
+
+.editor-status.is-error {
+  color: #f472b6;
+}
+
+/* Dim the artwork while a text edit is running. */
+.artwork-frame:has(+ .artwork-editor.is-busy) {
+  opacity: 0.6;
+  transition: opacity 0.3s ease;
+}
+
+.version-strip-wrap {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.version-strip-label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #606078;
+}
+
+.version-strip {
+  list-style: none;
+  display: flex;
+  gap: 0.6rem;
+  overflow-x: auto;
+  padding-bottom: 0.25rem;
+}
+
+.version-thumb {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #9090a8;
+  font-family: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.version-thumb img {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 0.5rem;
+  border: 2px solid transparent;
+  transition: border-color 0.2s ease;
+}
+
+.version-thumb:hover img {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.version-thumb.is-active {
+  color: #f0f0f5;
+}
+
+.version-thumb.is-active img {
+  border-color: #a78bfa;
+}
+
+/* --- Draw page: sketching an edit over an artwork --- */
+.sketch-edit-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  padding: 1rem 1.25rem;
+  border-radius: 1rem;
+  background: rgba(167, 139, 250, 0.08);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+}
+
+.sketch-edit-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.875rem;
+  color: #a0a0b8;
+}
+
+.sketch-edit-intro strong {
+  color: #f0f0f5;
+}
+
+.sketch-edit-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.sketch-edit-controls input {
+  flex: 1;
+  min-width: 14rem;
+}
+
+.sketch-edit-controls .action-btn {
+  text-decoration: none;
+}
+
+.sketch-edit-controls .btn-primary {
+  margin-top: 0;
+}
+
+.sketch-edit-bar .editor-status {
+  margin-top: 0;
+}
+
+/* Square artwork shouldn't stretch to the full workspace width. */
+.draw-canvas-wrap.is-artwork {
+  flex: 0 1 auto;
+  width: min(100%, 75vh);
+  margin: 0 auto;
+  background: #0d0d18;
+}
+
+.draw-canvas-wrap.is-busy {
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+.layer-lock {
+  width: 1.6rem;
+  text-align: center;
+  font-size: 0.8rem;
+  flex-shrink: 0;
 }
 
 /* --- Flash Messages --- */

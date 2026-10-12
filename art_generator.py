@@ -33,6 +33,7 @@ identically.
 import colorsys
 import math
 import random
+import re
 
 DEFAULT_PALETTE = ["#a78bfa", "#67e8f9", "#f472b6", "#e8e8f0"]
 
@@ -452,8 +453,10 @@ def generate_svg(dsp, gpt):
 
     # Major/minor + GPT mood together nudge overall brightness -- neither one
     # fixes it alone, per the brief.
-    mood = (gpt.get("mood") or "").strip().lower()
-    mood_bias = 0.12 if mood in _MOOD_BRIGHT else (-0.12 if mood in _MOOD_DARK else 0.0)
+    # GPT's mood is a free-form phrase ("hazy, melancholic drift"), so match
+    # on any word in it.
+    mood_words = set(re.findall(r"[a-z]+", (gpt.get("mood") or "").lower()))
+    mood_bias = 0.12 if mood_words & _MOOD_BRIGHT else (-0.12 if mood_words & _MOOD_DARK else 0.0)
     mode_bias = 0.12 if mode == "major" else (-0.12 if mode == "minor" else 0.0)
     brightness_adj = _clamp01(brightness + mode_bias * 0.6 + mood_bias * 0.6)
 
