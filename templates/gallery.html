@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gallery — AURA</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body class="auth-page">
+
+  <nav class="navbar" id="navbar">
+    <div class="navbar-inner">
+      <div class="navbar-left">
+        <a href="{{ url_for('index') }}" class="navbar-brand">AURA</a>
+        {% if g.user %}
+          <a href="{{ url_for('draw') }}" class="navbar-draw-btn">✏️ Draw</a>
+          <a href="{{ url_for('analyze') }}" class="navbar-analyze-btn">🎧 Analyze</a>
+        {% endif %}
+      </div>
+
+      <ul class="navbar-menu" id="navbar-menu">
+        <li><a href="{{ url_for('index') }}">Home</a></li>
+        {% if g.user %}
+          <li><a href="{{ url_for('board') }}">My Board</a></li>
+          <li><a href="{{ url_for('gallery') }}" class="is-active">Gallery</a></li>
+          <li><a href="{{ url_for('logout') }}" class="navbar-cta">Log Out</a></li>
+        {% else %}
+          <li><a href="{{ url_for('gallery') }}" class="is-active">Gallery</a></li>
+          <li><a href="{{ url_for('login') }}">Log In</a></li>
+          <li><a href="{{ url_for('signup') }}" class="navbar-cta">Sign Up</a></li>
+        {% endif %}
+      </ul>
+    </div>
+  </nav>
+
+  <main class="board-main">
+    <header class="board-header">
+      <div>
+        <h1>Gallery</h1>
+        <p class="auth-subtitle">Music turned into art: pieces published by AURA artists.</p>
+      </div>
+    </header>
+
+    {% if artworks %}
+      <ul class="art-grid">
+        {% for art in artworks %}
+          <li class="art-card">
+            <a class="art-card-image" href="{{ art.image_url }}" target="_blank" rel="noopener">
+              <img src="{{ art.image_url }}" alt="{{ art.title }}" loading="lazy">
+            </a>
+            <div class="art-card-body">
+              <h2 class="art-card-title">{{ art.title }}</h2>
+              <p class="art-card-artist">by {{ art.username }}</p>
+              {% if art.analysis.song_title %}
+                <p class="art-card-song">♪ {{ art.analysis.song_title }}{% if art.analysis.song_artist %} · {{ art.analysis.song_artist }}{% endif %}</p>
+              {% endif %}
+              {% if art.description %}
+                <p class="art-card-description">{{ art.description }}</p>
+              {% endif %}
+              <p class="art-card-meta">
+                {% if art.analysis.mood %}{{ art.analysis.mood }} · {% endif %}
+                {% if art.analysis.tempo_bpm %}{{ art.analysis.tempo_bpm }} BPM · {% endif %}
+                {{ art.published_at[:10] }}
+              </p>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="board-empty">
+        <p>No artworks have been published yet.</p>
+        {% if g.user %}
+          <a class="btn-primary board-new" href="{{ url_for('analyze') }}">🎧 Make the first one</a>
+        {% endif %}
+      </div>
+    {% endif %}
+  </main>
+</body>
+</html>

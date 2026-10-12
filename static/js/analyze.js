@@ -121,6 +121,7 @@
     flashes.innerHTML = doc.getElementById("flash-container").innerHTML;
     history.replaceState(null, "", url);
     if (window.AuraEditor) window.AuraEditor.init();
+    if (window.AuraSave) window.AuraSave.init();
 
     stopTimer();
     setStage("done");

@@ -1,12 +1,15 @@
 import base64
+import io
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
 import uuid
 from functools import wraps
 
+import mutagen
 from dotenv import load_dotenv
 from flask import Flask, abort, flash, g, jsonify, redirect, render_template, request, session, url_for
 from openai import OpenAI
@@ -19,7 +22,11 @@ load_dotenv()
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
-app.config["DATABASE"] = os.path.join(app.instance_path, "aura.db")
+# In production DATABASE_PATH points at a persistent disk (see render.yaml);
+# locally the database lives in instance/.
+app.config["DATABASE"] = os.environ.get("DATABASE_PATH") or os.path.join(app.instance_path, "aura.db")
+# Only send the login cookie over HTTPS when deployed behind it.
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE") == "1"
 app.config["MAX_CONTENT_LENGTH"] = 15 * 1024 * 1024  # 15 MB upload limit
 
 ALLOWED_AUDIO_EXTENSIONS = {"mp3", "wav"}
@@ -52,7 +59,7 @@ def close_db(exception):
 
 
 def init_db():
-    os.makedirs(app.instance_path, exist_ok=True)
+    os.makedirs(os.path.dirname(app.config["DATABASE"]), exist_ok=True)
     db = sqlite3.connect(app.config["DATABASE"])
     db.execute(
         """
@@ -65,6 +72,26 @@ def init_db():
         )
         """
     )
+    # Artworks saved from an Analyze result. Drafts are private to the artist;
+    # published ones also appear in the public gallery.
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS artworks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users (id),
+            title TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            image BLOB NOT NULL,
+            image_mime TEXT NOT NULL,
+            analysis_json TEXT NOT NULL DEFAULT '{}',
+            is_published INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            published_at TIMESTAMP
+        )
+        """
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_artworks_user ON artworks (user_id)")
     db.commit()
     db.close()
 
@@ -403,7 +430,7 @@ def _edit_artwork_image(images, prompt):
         return None, f"Image edit failed ({exc})."
 
 
-def _run_pipeline(audio_bytes, audio_format, description="", report=lambda stage: None):
+def _run_pipeline(audio_bytes, audio_format, description="", song=None, report=lambda stage: None):
     """DSP -> GPT listening pass -> image generation. Calls report(stage) as
     each step starts so the browser can show live progress. Raises ValueError
     if the audio itself can't be analyzed; GPT/image failures degrade into
@@ -438,6 +465,8 @@ def _run_pipeline(audio_bytes, audio_format, description="", report=lambda stage
         "mood": gpt.get("mood", "unknown"),
         "dominant_instruments": gpt.get("dominant_instruments", []),
         "description": description,
+        "song_title": (song or {}).get("title", ""),
+        "song_artist": (song or {}).get("artist", ""),
     }
 
     report("generating")
@@ -479,13 +508,13 @@ def _get_job_or_404(job_id):
     return job
 
 
-def _run_job(job_id, audio_bytes, audio_format, description):
+def _run_job(job_id, audio_bytes, audio_format, description, song):
     def report(stage):
         with _jobs_lock:
             _jobs[job_id]["stage"] = stage
 
     try:
-        result = _run_pipeline(audio_bytes, audio_format, description, report)
+        result = _run_pipeline(audio_bytes, audio_format, description, song, report)
         # Each edit appends a version; version 0 is the original artwork.
         artwork_png = result.pop("artwork_png")
         versions = [{"png": artwork_png, "label": "Original"}] if artwork_png else []
@@ -499,15 +528,40 @@ def _run_job(job_id, audio_bytes, audio_format, description):
 MAX_DESCRIPTION_CHARS = 1000
 
 
+MAX_SONG_FIELD_CHARS = 200
+
+
+def _song_info(audio_bytes, filename):
+    """The song's name and artist from its embedded ID3 tags (MP3s and many
+    WAVs carry them). Falls back to a tidied-up file name, e.g.
+    "03 - Night_Drive.mp3" -> "Night Drive"."""
+    title = artist = ""
+    try:
+        tags = mutagen.File(io.BytesIO(audio_bytes)).tags or {}
+        title = str(tags["TIT2"].text[0]) if "TIT2" in tags else ""
+        artist = str(tags["TPE1"].text[0]) if "TPE1" in tags else ""
+    except Exception:  # noqa: BLE001 - untagged or unreadable tags just mean no metadata
+        pass
+    if not title.strip():
+        stem = filename.rsplit(".", 1)[0].replace("_", " ")
+        title = re.sub(r"^\s*\d{1,3}\s*[-.)]\s*", "", stem) or stem
+    return {
+        "title": " ".join(title.split())[:MAX_SONG_FIELD_CHARS],
+        "artist": " ".join(artist.split())[:MAX_SONG_FIELD_CHARS],
+    }
+
+
 def _read_upload():
-    """Returns (audio_bytes, audio_format, description, error_message)."""
+    """Returns (audio_bytes, audio_format, description, song, error_message)."""
     description = (request.form.get("description") or "").strip()[:MAX_DESCRIPTION_CHARS]
     file = request.files.get("music_file")
     if not file or file.filename == "":
-        return None, None, description, "Please choose an audio file."
+        return None, None, description, None, "Please choose an audio file."
     if not allowed_audio_file(file.filename):
-        return None, None, description, "Only .mp3 and .wav files are supported."
-    return file.read(), file.filename.rsplit(".", 1)[1].lower(), description, None
+        return None, None, description, None, "Only .mp3 and .wav files are supported."
+    audio_bytes = file.read()
+    song = _song_info(audio_bytes, file.filename)
+    return audio_bytes, file.filename.rsplit(".", 1)[1].lower(), description, song, None
 
 
 def _render_analyze(result=None, artwork_image=None, job_id=None, versions=None):
@@ -544,12 +598,12 @@ def analyze():
         return _render_analyze()
 
     # Plain form POST: only reached when JavaScript is off, so run inline.
-    audio_bytes, audio_format, description, error = _read_upload()
+    audio_bytes, audio_format, description, song, error = _read_upload()
     if error:
         flash(error, "error")
         return _render_analyze()
     try:
-        result = _run_pipeline(audio_bytes, audio_format, description)
+        result = _run_pipeline(audio_bytes, audio_format, description, song)
     except ValueError as exc:
         flash(str(exc), "error")
         return _render_analyze()
@@ -562,7 +616,7 @@ def analyze():
 @app.route("/analyze/start", methods=["POST"])
 @login_required
 def analyze_start():
-    audio_bytes, audio_format, description, error = _read_upload()
+    audio_bytes, audio_format, description, song, error = _read_upload()
     if error:
         return jsonify(error=error), 400
 
@@ -576,7 +630,7 @@ def analyze_start():
             "result": None,
             "error": None,
         }
-    threading.Thread(target=_run_job, args=(job_id, audio_bytes, audio_format, description), daemon=True).start()
+    threading.Thread(target=_run_job, args=(job_id, audio_bytes, audio_format, description, song), daemon=True).start()
     return jsonify(job_id=job_id), 202
 
 
@@ -659,6 +713,241 @@ def analyze_edit(job_id):
         label=label,
         url=url_for("analyze_image", job_id=job_id, version=version),
     )
+
+
+MAX_TITLE_CHARS = 120
+MAX_ART_DESCRIPTION_CHARS = 2000
+BOARD_FILTERS = {"all": "", "drafts": "AND is_published = 0", "published": "AND is_published = 1"}
+
+
+def _wants_json():
+    return request.accept_mimetypes.best == "application/json"
+
+
+def _read_artwork_details():
+    """Returns (title, description) from the submitted form, trimmed to size."""
+    title = (request.form.get("title") or "").strip()[:MAX_TITLE_CHARS]
+    description = (request.form.get("description") or "").strip()[:MAX_ART_DESCRIPTION_CHARS]
+    return title, description
+
+
+def _board_return_url():
+    """Where board actions land afterwards: the filtered board view the
+    action came from, never an outside site."""
+    next_url = request.form.get("next") or ""
+    if next_url.startswith("/board"):
+        return next_url
+    return url_for("board")
+
+
+def _get_own_artwork_or_404(artwork_id):
+    artwork = get_db().execute(
+        "SELECT id, user_id, title, is_published FROM artworks WHERE id = ? AND user_id = ?",
+        (artwork_id, session["user_id"]),
+    ).fetchone()
+    if artwork is None:
+        abort(404)
+    return artwork
+
+
+@app.route("/board/save", methods=["POST"])
+@login_required
+def board_save():
+    """Saves the chosen version of an Analyze result to the artist's board,
+    as a draft or published. Posting again with artwork_id updates that
+    artwork instead of creating a new one."""
+    job = _get_job_or_404(request.form.get("job_id", ""))
+    if job["stage"] != "done":
+        abort(404)
+
+    title, description = _read_artwork_details()
+    publish = request.form.get("action") == "publish"
+
+    def fail(message):
+        if _wants_json():
+            return jsonify(error=message), 400
+        flash(message, "error")
+        return redirect(url_for("analyze", job=request.form.get("job_id")))
+
+    if publish and not title:
+        return fail("Give your artwork a title before publishing it.")
+
+    versions = job.get("versions") or []
+    if versions:
+        version = request.form.get("version", type=int)
+        if version is None:
+            version = len(versions) - 1
+        if not 0 <= version < len(versions):
+            return fail("Unknown version to save.")
+        image, image_mime = versions[version]["png"], "image/png"
+    elif job["result"].get("artwork_svg"):
+        image, image_mime = job["result"]["artwork_svg"].encode("utf-8"), "image/svg+xml"
+    else:
+        return fail("There's no artwork to save.")
+
+    analysis = job["result"].get("analysis") or {}
+    summary = json.dumps(
+        {
+            "song_title": analysis.get("song_title"),
+            "song_artist": analysis.get("song_artist"),
+            "mood": analysis.get("mood"),
+            "tempo_bpm": analysis.get("tempo_bpm"),
+            "key": analysis.get("key"),
+            "dominant_instruments": analysis.get("dominant_instruments") or [],
+        }
+    )
+
+    db = get_db()
+    artwork_id = request.form.get("artwork_id", type=int)
+    if artwork_id:
+        _get_own_artwork_or_404(artwork_id)
+        db.execute(
+            """
+            UPDATE artworks
+            SET title = ?, description = ?, image = ?, image_mime = ?, analysis_json = ?,
+                is_published = ?, updated_at = CURRENT_TIMESTAMP,
+                published_at = CASE WHEN ? THEN COALESCE(published_at, CURRENT_TIMESTAMP) END
+            WHERE id = ?
+            """,
+            (title, description, image, image_mime, summary, publish, publish, artwork_id),
+        )
+    else:
+        artwork_id = db.execute(
+            """
+            INSERT INTO artworks (user_id, title, description, image, image_mime, analysis_json,
+                                  is_published, published_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP END)
+            """,
+            (session["user_id"], title, description, image, image_mime, summary, publish, publish),
+        ).lastrowid
+    db.commit()
+
+    message = "Published to the gallery." if publish else "Saved to your board as a draft."
+    if _wants_json():
+        return jsonify(artwork_id=artwork_id, published=publish, message=message, board_url=url_for("board"))
+    flash(message, "success")
+    return redirect(url_for("board"))
+
+
+def _artwork_rows(where, params):
+    rows = get_db().execute(
+        f"""
+        SELECT a.id, a.title, a.description, a.analysis_json, a.is_published, a.image_mime,
+               a.created_at, a.published_at, u.username
+        FROM artworks a JOIN users u ON u.id = a.user_id
+        WHERE {where}
+        ORDER BY COALESCE(a.published_at, a.created_at) DESC, a.id DESC
+        """,
+        params,
+    ).fetchall()
+    artworks = []
+    for row in rows:
+        artwork = dict(row)
+        artwork["analysis"] = json.loads(row["analysis_json"] or "{}")
+        artwork["image_url"] = url_for("artwork_image", artwork_id=row["id"])
+        artworks.append(artwork)
+    return artworks
+
+
+@app.route("/board")
+@login_required
+def board():
+    show = request.args.get("show", "all")
+    if show not in BOARD_FILTERS:
+        show = "all"
+    artworks = _artwork_rows(f"a.user_id = ? {BOARD_FILTERS[show]}", (session["user_id"],))
+    counts = get_db().execute(
+        "SELECT COUNT(*) AS total, COALESCE(SUM(is_published), 0) AS published FROM artworks WHERE user_id = ?",
+        (session["user_id"],),
+    ).fetchone()
+    return render_template(
+        "board.html",
+        artworks=artworks,
+        show=show,
+        counts={"all": counts["total"], "published": counts["published"], "drafts": counts["total"] - counts["published"]},
+    )
+
+
+@app.route("/board/<int:artwork_id>/details", methods=["POST"])
+@login_required
+def board_update_details(artwork_id):
+    artwork = _get_own_artwork_or_404(artwork_id)
+    title, description = _read_artwork_details()
+    if artwork["is_published"] and not title:
+        flash("Published artworks need a title.", "error")
+    else:
+        db = get_db()
+        db.execute(
+            "UPDATE artworks SET title = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (title, description, artwork_id),
+        )
+        db.commit()
+        flash("Artwork details updated.", "success")
+    return redirect(_board_return_url())
+
+
+@app.route("/board/<int:artwork_id>/publish", methods=["POST"])
+@login_required
+def board_publish(artwork_id):
+    artwork = _get_own_artwork_or_404(artwork_id)
+    if not artwork["title"]:
+        flash("Give your artwork a title before publishing it.", "error")
+    else:
+        db = get_db()
+        db.execute(
+            """
+            UPDATE artworks SET is_published = 1, updated_at = CURRENT_TIMESTAMP,
+                published_at = COALESCE(published_at, CURRENT_TIMESTAMP)
+            WHERE id = ?
+            """,
+            (artwork_id,),
+        )
+        db.commit()
+        flash(f"“{artwork['title']}” is now in the gallery.", "success")
+    return redirect(_board_return_url())
+
+
+@app.route("/board/<int:artwork_id>/unpublish", methods=["POST"])
+@login_required
+def board_unpublish(artwork_id):
+    _get_own_artwork_or_404(artwork_id)
+    db = get_db()
+    db.execute(
+        "UPDATE artworks SET is_published = 0, published_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (artwork_id,),
+    )
+    db.commit()
+    flash("Moved back to drafts; it's no longer in the gallery.", "success")
+    return redirect(_board_return_url())
+
+
+@app.route("/board/<int:artwork_id>/delete", methods=["POST"])
+@login_required
+def board_delete(artwork_id):
+    _get_own_artwork_or_404(artwork_id)
+    db = get_db()
+    db.execute("DELETE FROM artworks WHERE id = ?", (artwork_id,))
+    db.commit()
+    flash("Artwork deleted.", "success")
+    return redirect(_board_return_url())
+
+
+@app.route("/artworks/<int:artwork_id>/image")
+def artwork_image(artwork_id):
+    """Published artworks are public; drafts are visible only to their artist."""
+    row = get_db().execute(
+        "SELECT user_id, image, image_mime, is_published FROM artworks WHERE id = ?", (artwork_id,)
+    ).fetchone()
+    if row is None or not (row["is_published"] or row["user_id"] == session.get("user_id")):
+        abort(404)
+    response = app.response_class(row["image"], mimetype=row["image_mime"])
+    response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
+    return response
+
+
+@app.route("/gallery")
+def gallery():
+    return render_template("gallery.html", artworks=_artwork_rows("a.is_published = 1", ()))
 
 
 if __name__ == "__main__":

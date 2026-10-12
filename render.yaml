@@ -1,0 +1,27 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: aura
+    runtime: python
+    plan: starter # persistent disks need a paid plan
+    buildCommand: pip install -r requirements.txt
+    # One worker process: analysis jobs live in that process's memory, so
+    # every request must reach the same one. Threads handle concurrency.
+    # The long timeout covers artwork edits, which wait on the image model.
+    startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 600 --bind 0.0.0.0:$PORT
+    healthCheckPath: /
+    disk:
+      name: aura-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_PATH
+        value: /var/data/aura.db
+      - key: SECRET_KEY
+        generateValue: true
+      - key: SESSION_COOKIE_SECURE
+        value: "1"
+      - key: OPENAI_API_KEY
+        sync: false # entered in the Render dashboard, never committed
+      - key: IMAGE_QUALITY
+        value: high

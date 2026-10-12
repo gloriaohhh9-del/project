@@ -5,3 +5,5 @@ python-dotenv>=1.0.0
 librosa>=0.10.2
 soundfile>=0.12.1
 numpy>=1.26.0
+mutagen>=1.47.0
+gunicorn>=23.0.0

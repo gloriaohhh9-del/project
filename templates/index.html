@@ -30,7 +30,9 @@
         <li><a href="#features">Features</a></li>
         <li><a href="#use-cases">Use Cases</a></li>
         <li><a href="#vision">Vision</a></li>
+        <li><a href="{{ url_for('gallery') }}">Gallery</a></li>
         {% if g.user %}
+          <li><a href="{{ url_for('board') }}">My Board</a></li>
           <li><a href="{{ url_for('index') }}">Hi, {{ g.user['username'] }}</a></li>
           <li><a href="{{ url_for('logout') }}" class="navbar-cta">Log Out</a></li>
         {% else %}

@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Board — AURA</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body class="auth-page">
+
+  <nav class="navbar" id="navbar">
+    <div class="navbar-inner">
+      <div class="navbar-left">
+        <a href="{{ url_for('index') }}" class="navbar-brand">AURA</a>
+        <a href="{{ url_for('draw') }}" class="navbar-draw-btn">✏️ Draw</a>
+        <a href="{{ url_for('analyze') }}" class="navbar-analyze-btn">🎧 Analyze</a>
+      </div>
+
+      <ul class="navbar-menu" id="navbar-menu">
+        <li><a href="{{ url_for('index') }}">Home</a></li>
+        <li><a href="{{ url_for('board') }}" class="is-active">My Board</a></li>
+        <li><a href="{{ url_for('gallery') }}">Gallery</a></li>
+        <li><a href="{{ url_for('logout') }}" class="navbar-cta">Log Out</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flash-container">
+        {% for category, message in messages %}
+          <div class="flash flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <main class="board-main">
+    <header class="board-header">
+      <div>
+        <h1>My Board</h1>
+        <p class="auth-subtitle">Your saved artworks. Drafts are private; published pieces appear in the <a href="{{ url_for('gallery') }}">gallery</a>.</p>
+      </div>
+      <a class="btn-primary board-new" href="{{ url_for('analyze') }}">🎧 New artwork</a>
+    </header>
+
+    <nav class="board-filters" aria-label="Filter artworks">
+      {% for key, label in [("all", "All"), ("drafts", "Drafts"), ("published", "Published")] %}
+        <a href="{{ url_for('board', show=key) }}" class="board-filter{% if show == key %} is-active{% endif %}"
+           {% if show == key %}aria-current="page"{% endif %}>{{ label }} <span>{{ counts[key] }}</span></a>
+      {% endfor %}
+    </nav>
+
+    {% if artworks %}
+      <ul class="art-grid">
+        {% for art in artworks %}
+          {% set back = url_for('board', show=show) %}
+          <li class="art-card">
+            <a class="art-card-image" href="{{ art.image_url }}" target="_blank" rel="noopener">
+              <img src="{{ art.image_url }}" alt="{{ art.title or 'Untitled artwork' }}" loading="lazy">
+            </a>
+            <div class="art-card-body">
+              <span class="art-badge {{ 'is-published' if art.is_published else 'is-draft' }}">
+                {{ "Published" if art.is_published else "Draft" }}
+              </span>
+              <h2 class="art-card-title">{{ art.title or "Untitled" }}</h2>
+              {% if art.analysis.song_title %}
+                <p class="art-card-song">♪ {{ art.analysis.song_title }}{% if art.analysis.song_artist %} · {{ art.analysis.song_artist }}{% endif %}</p>
+              {% endif %}
+              {% if art.description %}
+                <p class="art-card-description">{{ art.description }}</p>
+              {% endif %}
+              <p class="art-card-meta">
+                {% if art.analysis.mood %}{{ art.analysis.mood }} · {% endif %}
+                {% if art.analysis.tempo_bpm %}{{ art.analysis.tempo_bpm }} BPM · {% endif %}
+                {% if art.analysis.key %}{{ art.analysis.key }} · {% endif %}
+                {{ (art.published_at or art.created_at)[:10] }}
+              </p>
+
+              <details class="art-card-edit">
+                <summary>Edit title &amp; description</summary>
+                <form method="post" action="{{ url_for('board_update_details', artwork_id=art.id) }}" class="art-card-edit-form">
+                  <input type="hidden" name="next" value="{{ back }}">
+                  <div class="form-group">
+                    <label for="title-{{ art.id }}">Title</label>
+                    <input type="text" id="title-{{ art.id }}" name="title" maxlength="120"
+                           value="{{ art.title }}" placeholder="Name your piece" {% if art.is_published %}required{% endif %}>
+                  </div>
+                  <div class="form-group">
+                    <label for="description-{{ art.id }}">Description</label>
+                    <textarea id="description-{{ art.id }}" name="description" rows="4" maxlength="2000"
+                              placeholder="Tell viewers about this piece">{{ art.description }}</textarea>
+                  </div>
+                  <button type="submit" class="action-btn">Save changes</button>
+                </form>
+              </details>
+
+              <div class="art-card-actions">
+                {% if art.is_published %}
+                  <form method="post" action="{{ url_for('board_unpublish', artwork_id=art.id) }}">
+                    <input type="hidden" name="next" value="{{ back }}">
+                    <button type="submit" class="action-btn">Unpublish</button>
+                  </form>
+                {% else %}
+                  <form method="post" action="{{ url_for('board_publish', artwork_id=art.id) }}">
+                    <input type="hidden" name="next" value="{{ back }}">
+                    <button type="submit" class="btn-primary"
+                            {% if not art.title %}disabled title="Add a title first"{% endif %}>Publish</button>
+                  </form>
+                {% endif %}
+                <a class="action-btn" href="{{ art.image_url }}" download="{{ (art.title or 'aura-artwork') ~ ('.svg' if art.image_mime == 'image/svg+xml' else '.png') }}">⬇️</a>
+                <form method="post" action="{{ url_for('board_delete', artwork_id=art.id) }}"
+                      onsubmit='return confirm({{ ("Delete “" ~ (art.title or "Untitled") ~ "”? This can’t be undone.")|tojson }})'>
+                  <input type="hidden" name="next" value="{{ back }}">
+                  <button type="submit" class="action-btn art-delete" aria-label="Delete">🗑️</button>
+                </form>
+              </div>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="board-empty">
+        {% if show == "all" %}
+          <p>Nothing saved yet. Analyze a song, give the artwork a title, and save it here.</p>
+          <a class="btn-primary board-new" href="{{ url_for('analyze') }}">🎧 Analyze a track</a>
+        {% elif show == "drafts" %}
+          <p>No drafts. Everything you've saved is published.</p>
+        {% else %}
+          <p>Nothing published yet. Publish a draft to share it in the gallery.</p>
+        {% endif %}
+      </div>
+    {% endif %}
+  </main>
+</body>
+</html>

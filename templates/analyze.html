@@ -18,6 +18,8 @@
 
       <ul class="navbar-menu" id="navbar-menu">
         <li><a href="{{ url_for('index') }}">Home</a></li>
+        <li><a href="{{ url_for('board') }}">My Board</a></li>
+        <li><a href="{{ url_for('gallery') }}">Gallery</a></li>
         <li><a href="{{ url_for('logout') }}" class="navbar-cta">Log Out</a></li>
       </ul>
     </div>
@@ -94,6 +96,13 @@
       <div id="analysis-output">
       {% if analysis %}
         <div class="analysis-result">
+          {% if analysis.song_title %}
+            <p class="analysis-song">
+              <span class="analysis-song-label">♪ Now analyzed</span>
+              <span class="analysis-song-title">{{ analysis.song_title }}</span>
+              {% if analysis.song_artist %}<span class="analysis-song-artist">{{ analysis.song_artist }}</span>{% endif %}
+            </p>
+          {% endif %}
           <h2>Analysis</h2>
           <ul class="analysis-list">
             <li><strong>Tempo:</strong> {{ analysis.tempo_bpm }} BPM</li>
@@ -184,12 +193,49 @@
         {% if artwork_description %}
           <p class="artwork-description">{{ artwork_description }}</p>
         {% endif %}
+
+        {% if job_id %}
+          <form class="artwork-save" id="artwork-save" method="post" action="{{ url_for('board_save') }}">
+            <div class="editor-header">
+              <h2>Title &amp; description</h2>
+              <a class="artwork-save-board" href="{{ url_for('board') }}">My Board →</a>
+            </div>
+            <input type="hidden" name="job_id" value="{{ job_id }}">
+            <input type="hidden" name="version" id="artwork-save-version" value="{{ versions|length - 1 if versions else '' }}">
+            <input type="hidden" name="artwork_id" id="artwork-save-id" value="">
+
+            <div class="form-group">
+              <label for="artwork-title">Title</label>
+              <input type="text" id="artwork-title" name="title" maxlength="120"
+                     placeholder="Name your piece" autocomplete="off">
+            </div>
+
+            <div class="form-group">
+              <label for="artwork-statement">Description <span class="optional">(optional)</span></label>
+              <textarea id="artwork-statement" name="description" rows="4" maxlength="2000"
+                        placeholder="Tell viewers about this piece: the song, what it means to you, how you shaped it"></textarea>
+              <span class="form-hint">
+                {% if versions|length > 1 %}Saves the version currently shown above. {% endif %}Drafts stay private on your board; published pieces also appear in the public gallery.
+              </span>
+            </div>
+
+            <div class="artwork-save-actions">
+              <button type="submit" class="action-btn" name="action" value="draft" id="artwork-save-draft">💾 Save draft</button>
+              <button type="submit" class="btn-primary" name="action" value="publish" id="artwork-save-publish">Publish</button>
+            </div>
+
+            <div class="editor-status" id="artwork-save-status" hidden aria-live="polite">
+              <span class="editor-status-text" id="artwork-save-status-text"></span>
+            </div>
+          </form>
+        {% endif %}
       {% endif %}
       </div>
     </div>
   </main>
 
   <script src="{{ url_for('static', filename='js/artwork-editor.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/artwork-save.js') }}"></script>
   <script src="{{ url_for('static', filename='js/analyze.js') }}"></script>
 </body>
 </html>
