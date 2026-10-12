@@ -1,8 +1,12 @@
 import base64
+import ctypes
+import gc
 import io
 import json
 import os
 import re
+import resource
+import sys
 import threading
 import time
 import uuid
@@ -358,6 +362,27 @@ def _edit_artwork_image(images, prompt):
         return None, f"Image edit failed ({exc})."
 
 
+# Audio analysis is the memory-heavy step (~150 MB per track on top of the
+# libraries), so only one runs at a time; other uploads wait their turn as
+# "measuring". GPT and image generation are network calls and overlap freely.
+_dsp_lock = threading.Lock()
+
+
+def _analyze_audio_serialized(audio_bytes, audio_format):
+    with _dsp_lock:
+        try:
+            return analyze_audio(audio_bytes, audio_format)
+        finally:
+            gc.collect()
+            if sys.platform.startswith("linux"):
+                # Hand freed memory back to the OS so the next track starts
+                # from the same baseline.
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            # Shows up in the server logs. ru_maxrss is KB on Linux, bytes on macOS.
+            peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // (1024 if sys.platform.startswith("linux") else 1024 ** 2)
+            print(f"audio analysis done; peak memory so far {peak_mb} MB", flush=True)
+
+
 def _run_pipeline(audio_bytes, audio_format, description="", song=None, report=lambda stage: None):
     """DSP -> GPT listening pass -> image generation. Calls report(stage) as
     each step starts so the browser can show live progress. Raises ValueError
@@ -367,7 +392,7 @@ def _run_pipeline(audio_bytes, audio_format, description="", song=None, report=l
 
     report("measuring")
     try:
-        dsp = analyze_audio(audio_bytes, audio_format)
+        dsp = _analyze_audio_serialized(audio_bytes, audio_format)
     except Exception as exc:  # noqa: BLE001 - surface DSP failures (corrupt/short file, etc.)
         raise ValueError(f"Audio analysis failed: {exc}") from exc
 

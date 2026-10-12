@@ -11,6 +11,12 @@ services:
     startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 600 --bind 0.0.0.0:$PORT
     healthCheckPath: /
     envVars:
+      # Keep glibc from holding freed memory: few per-thread arenas, and
+      # large arrays mapped directly so freeing them returns the memory.
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+      - key: MALLOC_MMAP_THRESHOLD_
+        value: "1048576"
       - key: SECRET_KEY
         generateValue: true
       - key: SESSION_COOKIE_SECURE

@@ -12,10 +12,17 @@ A few features are approximated with a fast, robust proxy rather than a
 
 import hashlib
 import io
+import math
 
 import librosa
 import numpy as np
+import soundfile as sf
+import soxr
 
+SAMPLE_RATE = 22050
+# Memory grows with track length, so very long tracks are measured from
+# their first 6 minutes (the reported duration is still the full length).
+MAX_ANALYSIS_SEC = 6 * 60
 ENERGY_SEGMENTS = 48  # slices around the "energy fingerprint" ring
 HOP_LENGTH = 512
 MIN_NOTE_EVENTS = 24
@@ -37,6 +44,15 @@ _PITCH_CLASSES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B
 _FIFTHS_POSITION = [(i * 7) % 12 for i in range(12)]
 
 _SECTION_SIMILARITY_THRESHOLD = 0.82
+
+# The heaviest steps (constant-Q chroma, harmonic/percussive separation) run
+# over the track in pieces of this many frames (~48 s) so memory stays flat
+# however long the song is.
+CHUNK_FRAMES = 2048
+# Constant-Q chroma and HPSS are the heaviest per frame, so they use smaller
+# pieces (~24 s and ~12 s).
+CQT_CHUNK_FRAMES = 1024
+HPSS_CHUNK_FRAMES = 512
 
 
 def _clamp01(value):
@@ -131,9 +147,132 @@ def _segment_structure(chroma, mfcc, rms, centroid, n_frames, duration_sec):
     return sections
 
 
+def _load_audio(file_bytes):
+    """Same result as librosa.load(sr=SAMPLE_RATE, mono=False,
+    duration=MAX_ANALYSIS_SEC), but decodes and resamples in 10-second
+    blocks so the full-rate decode never sits in memory at once. Returns
+    (y, sr, full_duration_sec)."""
+    try:
+        f = sf.SoundFile(io.BytesIO(file_bytes))
+    except sf.LibsndfileError:
+        full_duration = librosa.get_duration(path=io.BytesIO(file_bytes))
+        y, sr = librosa.load(io.BytesIO(file_bytes), sr=SAMPLE_RATE, mono=False, duration=MAX_ANALYSIS_SEC)
+        return y, sr, full_duration
+
+    with f:
+        native_sr, channels = f.samplerate, f.channels
+        full_duration = f.frames / native_sr if f.frames > 0 else 0.0
+        frames = min(f.frames, MAX_ANALYSIS_SEC * native_sr) if f.frames > 0 else 0
+        stream = None
+        if native_sr != SAMPLE_RATE:
+            stream = soxr.ResampleStream(native_sr, SAMPLE_RATE, channels, dtype="float32", quality="HQ")
+        parts = []
+        for block in f.blocks(blocksize=native_sr * 10, dtype="float32", always_2d=True, frames=frames or -1):
+            parts.append(stream.resample_chunk(block) if stream else block)
+        if stream:
+            parts.append(stream.resample_chunk(np.zeros((0, channels), dtype=np.float32), last=True))
+
+    y = np.empty((channels, sum(len(p) for p in parts)), dtype=np.float32)
+    pos = 0
+    while parts:
+        part = parts.pop(0)
+        y[:, pos:pos + len(part)] = part.T
+        pos += len(part)
+    if stream and frames > 0:
+        y = librosa.util.fix_length(y, size=math.ceil(frames * SAMPLE_RATE / native_sr))
+    return (y[0] if channels == 1 else y), SAMPLE_RATE, full_duration or y.shape[-1] / SAMPLE_RATE
+
+
+def _magnitude_spectrogram(y, hop_length, n_fft=2048):
+    """np.abs(librosa.stft(y)) built piecewise: the full complex STFT is
+    twice the size of the magnitudes we keep. Padding once up front and
+    running each piece uncentered yields exactly the same frames."""
+    padded = np.pad(y, n_fft // 2, mode="constant")
+    n_frames = 1 + (len(padded) - n_fft) // hop_length
+    spec = np.empty((1 + n_fft // 2, n_frames), dtype=np.float32)
+    for start in range(0, n_frames, CHUNK_FRAMES):
+        stop = min(start + CHUNK_FRAMES, n_frames)
+        piece = padded[start * hop_length:(stop - 1) * hop_length + n_fft]
+        spec[:, start:stop] = np.abs(librosa.stft(piece, n_fft=n_fft, hop_length=hop_length, center=False))
+    return spec
+
+
+def _estimate_tempo(onset_env, sr, hop_length):
+    """The tempo beat_track would estimate on its own, with the tempogram
+    averaged piecewise rather than built for the whole song at once (that
+    full tempogram was the biggest single allocation in the analysis)."""
+    win_length = librosa.time_to_frames(8.0, sr=sr, hop_length=hop_length).item()
+    n = len(onset_env)
+    # Same padding tempogram(center=True) applies; each uncentered piece
+    # then produces exactly the same frames.
+    padded = np.pad(onset_env, win_length // 2, mode="linear_ramp", end_values=[0, 0])
+    total = np.zeros(win_length)
+    for start in range(0, n, CHUNK_FRAMES):
+        stop = min(start + CHUNK_FRAMES, n)
+        tg = librosa.feature.tempogram(
+            onset_envelope=padded[start:stop + win_length - 1], sr=sr, hop_length=hop_length,
+            win_length=win_length, center=False,
+        )
+        total += tg.sum(axis=1)
+    return librosa.feature.tempo(tg=(total / n)[:, None], sr=sr, hop_length=hop_length, aggregate=None)
+
+
+def _per_frame(feature, spec, **kwargs):
+    """Runs a per-frame spectral feature (centroid, flatness) piecewise --
+    each frame only depends on itself, so the result is identical, without
+    the feature's full-song temporary arrays."""
+    return np.concatenate(
+        [feature(S=spec[:, start:start + CHUNK_FRAMES], **kwargs)[0] for start in range(0, spec.shape[1], CHUNK_FRAMES)]
+    )
+
+
+def _rms(y, hop_length, frame_length=2048):
+    """librosa.feature.rms(y=y) computed over frames piecewise; the
+    one-shot version squares every overlapping frame at once."""
+    padded = np.pad(y, frame_length // 2, mode="constant")
+    frames = librosa.util.frame(padded, frame_length=frame_length, hop_length=hop_length)  # a view, no copy
+    rms = np.empty(frames.shape[1], dtype=np.float32)
+    for start in range(0, frames.shape[1], CHUNK_FRAMES):
+        piece = frames[:, start:start + CHUNK_FRAMES]
+        rms[start:start + CHUNK_FRAMES] = np.sqrt(np.mean(np.square(piece), axis=0))
+    return rms
+
+
+def _chroma_cqt_chunked(y, sr, hop_length):
+    """chroma_cqt over the whole track, computed piecewise. Pieces are
+    hop-aligned so their frames line up exactly with the other features'
+    frames; a short tail is folded into the last piece rather than analyzed
+    on its own."""
+    step = CQT_CHUNK_FRAMES * hop_length
+    parts = []
+    start = 0
+    while start < len(y):
+        end = start + step
+        if len(y) - end < step // 2:
+            end = len(y)
+        chroma = librosa.feature.chroma_cqt(y=y[start:end], sr=sr, hop_length=hop_length)
+        # Each centered piece has one extra trailing frame that belongs to
+        # the next piece.
+        parts.append(chroma if end == len(y) else chroma[:, : (end - start) // hop_length])
+        start = end
+    return np.concatenate(parts, axis=1)
+
+
+def _harmonic_percussive_energy(spec):
+    """Total harmonic and percussive energy, from HPSS on the magnitude
+    spectrogram piece by piece (its median filters span only ~31 frames, so
+    piece boundaries barely matter)."""
+    harmonic = percussive = 0.0
+    for start in range(0, spec.shape[1], HPSS_CHUNK_FRAMES):
+        h, p = librosa.decompose.hpss(spec[:, start:start + HPSS_CHUNK_FRAMES])
+        harmonic += float(np.sum(h ** 2))
+        percussive += float(np.sum(p ** 2))
+    return np.sqrt(harmonic), np.sqrt(percussive)
+
+
 def analyze_audio(file_bytes, audio_format):
     """Return a dict of DSP-measured features for the given audio bytes."""
-    y_raw, sr = librosa.load(io.BytesIO(file_bytes), sr=22050, mono=False)
+    y_raw, sr, full_duration = _load_audio(file_bytes)
 
     if y_raw.ndim == 1:
         y = y_raw
@@ -150,8 +289,24 @@ def analyze_audio(file_bytes, audio_format):
 
     hop_length = HOP_LENGTH
 
+    # One magnitude spectrogram (and its log-mel form) shared by the spectral
+    # features below. Letting each feature recompute it from the audio peaked
+    # around 750 MB on a 4-minute song, more than a small server has.
+    spec = _magnitude_spectrogram(y, hop_length)
+    mel_db = librosa.power_to_db(librosa.feature.melspectrogram(S=spec ** 2, sr=sr))
+
+    # --- Rhythm density (onsets per second, normalized) + onset strengths for "Beat" ---
+    onset_env = librosa.onset.onset_strength(S=mel_db, sr=sr, hop_length=hop_length)
+    onset_frames = librosa.onset.onset_detect(sr=sr, hop_length=hop_length, onset_envelope=onset_env)
+    onsets_per_sec = len(onset_frames) / duration_sec if duration_sec > 0 else 0.0
+    rhythm_density = _clamp01(onsets_per_sec / 8.0)
+
     # --- Tempo + beat regularity ("Rhythm" regularity) ---
-    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop_length)
+    # The beat tracker's own onset curve aggregates mel bands by median.
+    beat_env = librosa.onset.onset_strength(S=mel_db, sr=sr, hop_length=hop_length, aggregate=np.median)
+    tempo, beat_frames = librosa.beat.beat_track(
+        onset_envelope=beat_env, sr=sr, hop_length=hop_length, bpm=_estimate_tempo(beat_env, sr, hop_length)
+    )
     tempo_bpm = float(np.atleast_1d(tempo)[0]) if np.size(tempo) else 0.0
 
     if len(beat_frames) >= 3:
@@ -163,7 +318,7 @@ def analyze_audio(file_bytes, audio_format):
         tempo_stability = 0.5
 
     # --- Energy fingerprint (RMS, binned into fixed-size segments) ---
-    rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
+    rms = _rms(y, hop_length)
     if len(rms) >= ENERGY_SEGMENTS:
         bin_edges = np.linspace(0, len(rms), ENERGY_SEGMENTS + 1, dtype=int)
         energy_timeline = [
@@ -178,22 +333,16 @@ def analyze_audio(file_bytes, audio_format):
     overall_energy = _clamp01(float(np.mean(rms)) / (float(np.max(rms)) or 1.0))  # "Volume/Loudness"
     dynamic_range = _clamp01(float(np.std(energy_timeline)) * 3.0)  # "Dynamics" spread
 
-    # --- Rhythm density (onsets per second, normalized) + onset strengths for "Beat" ---
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
-    onset_frames = librosa.onset.onset_detect(y=y, sr=sr, hop_length=hop_length, onset_envelope=onset_env)
-    onsets_per_sec = len(onset_frames) / duration_sec if duration_sec > 0 else 0.0
-    rhythm_density = _clamp01(onsets_per_sec / 8.0)
-
     # --- Brightness (spectral centroid) -- also doubles as a pitch-height proxy ---
-    centroid = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)[0]
+    centroid = _per_frame(librosa.feature.spectral_centroid, spec, sr=sr)
     brightness = _clamp01(float(np.mean(centroid)) / 4000.0)
 
     # --- Timbre sharpness (spectral flatness: noise-like/harsh vs. tonal/smooth) ---
-    flatness = librosa.feature.spectral_flatness(y=y, hop_length=hop_length)[0]
+    flatness = _per_frame(librosa.feature.spectral_flatness, spec)
     timbre_sharpness = _clamp01(float(np.mean(flatness)) * 6.0)
 
     # --- Key, mode, and full harmonic fingerprint ---
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
+    chroma = _chroma_cqt_chunked(y, sr, hop_length)
     chroma_mean = chroma.mean(axis=1)
     root, mode = _estimate_key(chroma_mean)
     key_name = f"{_PITCH_CLASSES[root]} {mode.capitalize()}"
@@ -209,9 +358,8 @@ def analyze_audio(file_bytes, audio_format):
     harmonic_tension = _clamp01(entropy)
 
     # --- Harmonic vs. percussive balance (source separation) ---
-    y_harmonic, y_percussive = librosa.effects.hpss(y)
-    harmonic_energy = float(np.sqrt(np.mean(y_harmonic ** 2)))
-    percussive_energy = float(np.sqrt(np.mean(y_percussive ** 2)))
+    harmonic_energy, percussive_energy = _harmonic_percussive_energy(spec)
+    del spec  # the largest array here; nothing below needs it
     harmonic_ratio = _clamp01(harmonic_energy / ((harmonic_energy + percussive_energy) or 1.0))
 
     # --- Noisiness (zero-crossing rate) -> background grain density ---
@@ -219,7 +367,7 @@ def analyze_audio(file_bytes, audio_format):
     noisiness = _clamp01(float(np.mean(zcr)) / 0.3)
 
     # --- Timbre fingerprint -> deterministic per-track random seed ---
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, hop_length=hop_length)
+    mfcc = librosa.feature.mfcc(S=mel_db, n_mfcc=13)
     mfcc_mean = mfcc.mean(axis=1)
     track_seed = _seed_from_vector(mfcc_mean)
 
@@ -279,7 +427,7 @@ def analyze_audio(file_bytes, audio_format):
     return {
         "tempo_bpm": round(tempo_bpm, 1),
         "tempo_stability": round(tempo_stability, 3),
-        "duration_sec": round(duration_sec, 1),
+        "duration_sec": round(max(full_duration, duration_sec), 1),
         "energy": round(overall_energy, 3),
         "energy_timeline": [round(v, 3) for v in energy_timeline],
         "dynamic_range": round(dynamic_range, 3),
