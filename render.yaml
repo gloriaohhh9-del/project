@@ -27,3 +27,7 @@ services:
         sync: false # entered in the Render dashboard, never committed
       - key: IMAGE_QUALITY
         value: high
+      # Tracks allowed in progress at once; more uploads get a "busy, try
+      # again shortly" message instead of overloading the server.
+      - key: MAX_ACTIVE_JOBS
+        value: "5"
