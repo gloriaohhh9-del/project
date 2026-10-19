@@ -16,12 +16,7 @@
         <a href="{{ url_for('analyze') }}" class="navbar-analyze-btn">🎧 Analyze</a>
       </div>
 
-      <ul class="navbar-menu" id="navbar-menu">
-        <li><a href="{{ url_for('index') }}">Home</a></li>
-        <li><a href="{{ url_for('board') }}" class="is-active">My Board</a></li>
-        <li><a href="{{ url_for('gallery') }}">Gallery</a></li>
-        <li><a href="{{ url_for('logout') }}" class="navbar-cta">Log Out</a></li>
-      </ul>
+      {% with active = 'board' %}{% include "_nav_menu.html" %}{% endwith %}
     </div>
   </nav>
 
@@ -56,7 +51,7 @@
         {% for art in artworks %}
           {% set back = url_for('board', show=show) %}
           <li class="art-card">
-            <a class="art-card-image" href="{{ art.image_url }}" target="_blank" rel="noopener">
+            <a class="art-card-image" href="{{ art.page_url }}">
               <img src="{{ art.image_url }}" alt="{{ art.title or 'Untitled artwork' }}" loading="lazy">
             </a>
             <div class="art-card-body">
@@ -76,6 +71,11 @@
                 {% if art.analysis.key %}{{ art.analysis.key }} · {% endif %}
                 {{ art.date }}
               </p>
+              {% if art.is_published %}
+                <p class="art-card-meta art-card-reactions">
+                  <a href="{{ art.page_url }}">♥ {{ art.like_count }} · 💬 {{ art.comment_count }}</a>
+                </p>
+              {% endif %}
 
               <details class="art-card-edit">
                 <summary>Edit title &amp; description</summary>
