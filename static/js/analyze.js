@@ -28,8 +28,16 @@
 
   let timer = null;
 
-  function setStage(stage) {
-    // "queued" is the gap between upload finishing and the server starting.
+  function queuedText(ahead) {
+    // ahead: tracks in line before this one (the first is being measured).
+    if (!ahead) return STATUS_TEXT.queued;
+    return ahead === 1
+      ? "Waiting in line: 1 track ahead of yours…"
+      : "Waiting in line: " + ahead + " tracks ahead of yours…";
+  }
+
+  function setStage(stage, ahead) {
+    // "queued" is the wait before the server starts measuring this track.
     const shown = stage === "queued" ? "measuring" : stage;
     const current = STAGES.indexOf(shown);
     panel.querySelectorAll(".progress-steps li").forEach((li) => {
@@ -37,7 +45,7 @@
       li.classList.toggle("is-done", i < current || shown === "done");
       li.classList.toggle("is-active", i === current && shown !== "done");
     });
-    statusEl.textContent = STATUS_TEXT[stage] || stage;
+    statusEl.textContent = stage === "queued" ? queuedText(ahead) : STATUS_TEXT[stage] || stage;
     panel.classList.toggle("is-complete", stage === "done");
     placeholder.hidden = !(stage === "generating" || stage === "loading");
   }
@@ -91,11 +99,11 @@
     const url = form.dataset.statusUrl.replace("JOB_ID", jobId);
     for (;;) {
       const res = await fetch(url, { headers: { Accept: "application/json" } });
-      if (!res.ok) throw new Error("Lost track of this job (" + res.status + "). Please try again.");
-      const job = await res.json();
+      const job = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(job.error || "Lost track of this job (" + res.status + "). Please try again.");
       if (job.stage === "error") throw new Error(job.error || "Something went wrong.");
       if (job.stage === "done") return;
-      setStage(job.stage);
+      setStage(job.stage, job.ahead);
       await new Promise((r) => setTimeout(r, POLL_MS));
     }
   }
@@ -122,6 +130,7 @@
     history.replaceState(null, "", url);
     if (window.AuraEditor) window.AuraEditor.init();
     if (window.AuraSave) window.AuraSave.init();
+    if (window.AuraVideo) window.AuraVideo.init();
 
     stopTimer();
     setStage("done");

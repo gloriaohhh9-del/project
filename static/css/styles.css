@@ -1689,6 +1689,166 @@ footer a {
   margin-top: 0;
 }
 
+/* --- Analyze: music video panel --- */
+.artwork-video {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-top: 1.5rem;
+  padding: 1.25rem 1.35rem;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.artwork-video .editor-header,
+.artwork-video .editor-status {
+  margin: 0;
+}
+
+.artwork-video .form-group[hidden],
+.artwork-video [hidden] {
+  display: none;
+}
+
+.video-controls {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.video-controls .btn-primary {
+  margin-top: 0;
+  padding: 0.6rem 1.4rem;
+  font-size: 0.95rem;
+}
+
+.video-style {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.video-style legend {
+  margin-bottom: 0.4rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #c4c4d8;
+}
+
+.video-style label {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.6rem;
+  font-size: 0.875rem;
+  color: #a0a0b8;
+  cursor: pointer;
+}
+
+.video-style label:has(input:checked) {
+  border-color: rgba(167, 139, 250, 0.6);
+  background: rgba(167, 139, 250, 0.08);
+}
+
+.video-style input {
+  margin-top: 0.2rem;
+  accent-color: #a78bfa;
+}
+
+.video-style strong {
+  color: #e8e8f4;
+}
+
+.video-mute {
+  margin-right: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.875rem;
+  color: #a0a0b8;
+  cursor: pointer;
+}
+
+.video-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.video-stage canvas,
+.video-result video {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+  border-radius: 0.75rem;
+  background: #000;
+}
+
+.video-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.video-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, #a78bfa, #67e8f9);
+}
+
+.video-stage .progress-elapsed {
+  align-self: flex-end;
+}
+
+.video-result {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.ai-video {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ai-video .editor-header,
+.ai-video .editor-status {
+  margin: 0;
+}
+
+.ai-video .video-result video,
+.ai-video .video-stage canvas {
+  aspect-ratio: 16 / 9;
+}
+
+.ai-video-source {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0.01;
+  pointer-events: none;
+}
+
+.video-download {
+  align-self: flex-end;
+  margin-top: 0;
+  text-decoration: none;
+}
+
 /* --- My Board & Gallery --- */
 .board-main {
   flex: 1;

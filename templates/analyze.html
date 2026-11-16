@@ -190,6 +190,79 @@
             </div>
           </section>
         {% endif %}
+        {% if artwork_image or artwork_svg %}
+          <section class="artwork-video" id="artwork-video">
+            <div class="editor-header">
+              <h2>Music video</h2>
+            </div>
+            <p class="editor-hint">
+              Turns the artwork above into a video as long as the song: it opens on this exact
+              image, then moves to the music in the style you pick below, changing its look with each section of the song. Your song is the
+              soundtrack. Made right here in your browser — it plays through once while recording.
+            </p>
+
+            <div class="form-group" id="video-file-row" hidden>
+              <label for="video-song-file">Song file</label>
+              <input type="file" id="video-song-file" accept=".mp3,.wav,audio/mpeg,audio/wav">
+            </div>
+
+            <fieldset class="video-style">
+              <legend>Style</legend>
+              <label><input type="radio" name="video-style" value="visualizer" checked>
+                <span><strong>Visualizer</strong> — classic music-visualizer trails, tunnels and waveforms (like MilkDrop or Windows Media Player), in your artwork's colours</span></label>
+              <label><input type="radio" name="video-style" value="artwork">
+                <span><strong>Artwork in motion</strong> — the artwork's own colours move and glow to the music</span></label>
+            </fieldset>
+
+            <div class="video-controls">
+              <label class="video-mute"><input type="checkbox" id="video-mute"> Mute while recording</label>
+              <button type="button" class="action-btn" id="video-cancel" hidden>Cancel</button>
+              <button type="button" class="btn-primary" id="video-start">🎬 Create video</button>
+            </div>
+
+            <div class="video-stage" id="video-stage" hidden>
+              <canvas id="video-canvas"></canvas>
+              <div class="video-progress"><span id="video-progress-bar"></span></div>
+              <span class="progress-elapsed" id="video-time"></span>
+            </div>
+
+            <div class="editor-status" id="video-status" hidden aria-live="polite">
+              <span class="editor-status-text" id="video-status-text"></span>
+            </div>
+
+            <div class="video-result" id="video-result" hidden>
+              <video id="video-player" controls playsinline></video>
+              <a class="btn-primary video-download" id="video-download" href="#" download>⬇️ Download video</a>
+            </div>
+
+            {% if job_id and artwork_image %}
+              <div class="ai-video" id="ai-video" data-url="{{ url_for('analyze_ai_video', job_id=job_id) }}">
+                <div class="editor-header">
+                  <h2>AI video <span class="optional">(8 seconds)</span></h2>
+                </div>
+                <p class="editor-hint">
+                  Google's Gemini Omni Flash animates the artwork shown above, directed by the most
+                  energetic 8 seconds of your song, which then becomes the video's only sound. 720p.
+                  Costs about $0.80 per video and takes a minute or two.
+                </p>
+                <div class="video-controls">
+                  <button type="button" class="btn-primary" id="ai-video-start">✨ Create AI video (~$0.80)</button>
+                </div>
+                <div class="editor-status" id="ai-video-status" hidden aria-live="polite">
+                  <span class="editor-status-text" id="ai-video-status-text"></span>
+                  <span class="progress-elapsed" id="ai-video-elapsed"></span>
+                </div>
+                <div class="video-stage" id="ai-video-stage" hidden>
+                  <canvas id="ai-video-canvas"></canvas>
+                </div>
+                <div class="video-result" id="ai-video-result" hidden>
+                  <video id="ai-video-player" controls playsinline></video>
+                  <a class="btn-primary video-download" id="ai-video-download" href="#" download>⬇️ Download AI video</a>
+                </div>
+              </div>
+            {% endif %}
+          </section>
+        {% endif %}
         {% if artwork_description %}
           <p class="artwork-description">{{ artwork_description }}</p>
         {% endif %}
@@ -236,6 +309,8 @@
 
   <script src="{{ url_for('static', filename='js/artwork-editor.js') }}"></script>
   <script src="{{ url_for('static', filename='js/artwork-save.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/aura-visualizer.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/artwork-video.js') }}"></script>
   <script src="{{ url_for('static', filename='js/analyze.js') }}"></script>
 </body>
 </html>

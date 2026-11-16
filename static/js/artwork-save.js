@@ -46,7 +46,9 @@ window.AuraSave = (function () {
       draftBtn.disabled = publishBtn.disabled = true;
       setStatus("busy", action === "publish" ? "Publishing…" : "Saving…");
       try {
-        const res = await fetch(form.action, {
+        // getAttribute, not form.action: the buttons are named "action",
+        // so form.action returns them instead of the form's URL.
+        const res = await fetch(form.getAttribute("action"), {
           method: "POST",
           body: formData,
           headers: { Accept: "application/json" },

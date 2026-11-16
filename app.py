@@ -7,6 +7,7 @@ import os
 import re
 import resource
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -14,13 +15,15 @@ from functools import wraps
 
 import mutagen
 from dotenv import load_dotenv
-from flask import Flask, abort, flash, g, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, abort, flash, g, jsonify, redirect, render_template, request, send_file, session, url_for
 from openai import OpenAI
+from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import store
 from art_generator import generate_svg
 from audio_analysis import analyze_audio
+from video_generator import generate_video, parse_music
 
 load_dotenv()
 
@@ -29,6 +32,18 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-in-pr
 # Only send the login cookie over HTTPS when deployed behind it.
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE") == "1"
 app.config["MAX_CONTENT_LENGTH"] = 15 * 1024 * 1024  # 15 MB upload limit
+
+
+@app.url_defaults
+def _static_version(endpoint, values):
+    """Adds ?v=<last modified> to static file links, so browsers fetch a
+    script or stylesheet again whenever it changes instead of reusing a
+    cached copy."""
+    if endpoint == "static" and "filename" in values and "v" not in values:
+        try:
+            values["v"] = int(os.stat(os.path.join(app.static_folder, values["filename"])).st_mtime)
+        except OSError:
+            pass
 
 ALLOWED_AUDIO_EXTENSIONS = {"mp3", "wav"}
 
@@ -189,8 +204,11 @@ ANALYSIS_SYSTEM_PROMPT = (
     "in your mind. Let the music lead -- its breath, grain, swells, silences, "
     "and the way sounds move against each other. Favor organic, living "
     "qualities: things that grow, flow, drift, erode, bloom, tangle, or "
-    "dissolve, and textures with a natural or handmade feel. Any medium, "
-    "scale, or degree of abstraction is fine if it fits what you hear; every "
+    "dissolve, and textures with a natural or handmade feel. The artwork is "
+    "always fully abstract: color fields, gestures, marks, shapes, layers, "
+    "and textures -- never recognizable objects, figures, faces, animals, "
+    "landscapes, skies, or scenes, and never photographic or realistic "
+    "rendering. Any medium or scale is fine if it fits what you hear; every "
     "track should feel like its own world.\n\n"
     "You'll also be given a few rough measurements of the track. Treat them "
     "as background, not instructions -- trust your ears where they disagree, "
@@ -201,17 +219,24 @@ ANALYSIS_SYSTEM_PROMPT = (
     "they do, let it lead: their story, imagery, and emotional reading should "
     "shape the mood, palette, and artwork, while what you hear decides how it "
     "is rendered (texture, motion, energy). Weave their ideas in as an artist "
-    "would rather than illustrating them word for word. Instruments are "
+    "would rather than illustrating them word for word -- if they picture "
+    "something concrete (a beach, a person, a city at night), carry over its "
+    "colors, light, and feeling as abstract form, not the thing itself. "
+    "Instruments are "
     "still whatever you actually hear.\n\n"
     "Respond with ONLY a JSON object (no prose, no markdown) with these "
     "fields: mood (a short phrase in your own words), dominant_instruments "
     "(array of up to 4 short strings), color_palette (array of 3-6 hex color "
     "strings drawn from the colors you imagine), and art_prompt (a rich, "
-    "sensory description of the artwork, a short paragraph, written for an "
-    "image model)."
+    "sensory description of the abstract artwork, a short paragraph, written "
+    "for an image model)."
 )
 
-IMAGE_STYLE_SUFFIX = " No text, lettering, signatures, or watermarks."
+IMAGE_STYLE_SUFFIX = (
+    " Purely abstract, non-representational art: no recognizable objects, "
+    "figures, faces, animals, landscapes, or scenes, and no photorealism. "
+    "No text, lettering, signatures, or watermarks."
+)
 
 
 def _describe_dsp(dsp):
@@ -283,12 +308,12 @@ def _get_gpt_analysis(audio_bytes, audio_format, dsp, description=""):
 
 def _build_image_prompt(dsp, gpt, description=""):
     """GPT's art direction already folds in what the DSP measured, so it's
-    passed through as-is; only a no-text guard is added."""
+    passed through as-is; only the abstract-style and no-text guard is added."""
     art_prompt = (gpt.get("art_prompt") or "").strip()
     if not art_prompt:
         mood = gpt.get("mood", "an unnamed feeling")
         art_prompt = (
-            f"An organic, flowing artwork that feels like music with the mood of {mood}. "
+            f"An organic, flowing abstract artwork that feels like music with the mood of {mood}. "
             f"The sound is described as: {_describe_dsp(dsp)} Translate this into "
             "texture, movement, and color rather than literal imagery."
         )
@@ -328,10 +353,10 @@ EDIT_SKETCH_PROMPT = (
     "The first image is an artwork that the user has drawn rough marks on to "
     "request an edit; the second image is the same artwork before the marks. "
     "Every mark is a request to ADD or CHANGE something at that spot -- never "
-    "noise to clean up. Work out what each mark depicts from its shape, size, "
-    "color, and placement (a circle might be a sun, moon, or orb; small V "
-    "shapes might be birds; a line might be a horizon, path, or crack of "
-    "light) and paint that as a clearly visible, finished element in the "
+    "noise to clean up. Read each mark's shape, size, color, and placement "
+    "(a circle might become an orb or ring of color; a line a sweep, seam, or "
+    "crack of light) and paint it as a clearly visible, finished abstract "
+    "form in the "
     "artwork's existing style, palette, and texture, at the same position and "
     "roughly the same size as the mark. The new elements must be obvious when "
     "comparing the result to the second image. Outside the marked areas, keep "
@@ -362,42 +387,86 @@ def _edit_artwork_image(images, prompt):
         return None, f"Image edit failed ({exc})."
 
 
-# Audio analysis is the memory-heavy step (~150 MB per track on top of the
-# libraries), so only one runs at a time; other uploads wait their turn as
-# "measuring". GPT and image generation are network calls and overlap freely.
-_dsp_lock = threading.Lock()
+# Audio analysis is the memory- and CPU-heavy step, so only one runs at a
+# time. Waiting tracks line up first-come, first-served in _dsp_queue (the
+# head is the one being measured), which lets the page tell each listener
+# how many tracks are ahead of theirs. GPT and image generation are network
+# calls and overlap freely.
+_dsp_queue = []
+_dsp_cond = threading.Condition()
 
 
-def _analyze_audio_serialized(audio_bytes, audio_format):
-    with _dsp_lock:
-        try:
-            return analyze_audio(audio_bytes, audio_format)
-        finally:
-            gc.collect()
-            if sys.platform.startswith("linux"):
-                # Hand freed memory back to the OS so the next track starts
-                # from the same baseline.
-                ctypes.CDLL("libc.so.6").malloc_trim(0)
-            # Shows up in the server logs. ru_maxrss is KB on Linux, bytes on macOS.
-            peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // (1024 if sys.platform.startswith("linux") else 1024 ** 2)
-            print(f"audio analysis done; peak memory so far {peak_mb} MB", flush=True)
+def _dsp_queue_position(ticket):
+    """How many tracks are ahead of this one (0 = being measured now), or
+    None when it isn't waiting on the analyzer."""
+    with _dsp_cond:
+        return _dsp_queue.index(ticket) if ticket in _dsp_queue else None
 
 
-def _run_pipeline(audio_bytes, audio_format, description="", song=None, report=lambda stage: None):
+def _analyze_audio_serialized(audio_bytes, audio_format, ticket, on_start=lambda: None):
+    with _dsp_cond:
+        _dsp_queue.append(ticket)
+        _dsp_cond.wait_for(lambda: _dsp_queue[0] == ticket)
+    try:
+        on_start()
+        return analyze_audio(audio_bytes, audio_format)
+    finally:
+        with _dsp_cond:
+            _dsp_queue.remove(ticket)
+            _dsp_cond.notify_all()
+        gc.collect()
+        if sys.platform.startswith("linux"):
+            # Hand freed memory back to the OS so the next track starts
+            # from the same baseline.
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        # Shows up in the server logs. ru_maxrss is KB on Linux, bytes on macOS.
+        peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // (1024 if sys.platform.startswith("linux") else 1024 ** 2)
+        print(f"audio analysis done; peak memory so far {peak_mb} MB", flush=True)
+
+
+def _warm_up_analyzer():
+    """librosa compiles parts of itself (beat tracking etc.) the first time
+    they run, which takes a long while on a small server. Doing it once at
+    startup on a few seconds of synthetic audio spares the first listener
+    after every restart or wake-up from paying that cost."""
+    try:
+        import numpy as np
+        import soundfile as sf
+
+        sr = 22050
+        t = np.arange(sr * 4) / sr
+        tone = 0.3 * np.sin(2 * np.pi * 220 * t) * (1 + np.sign(np.sin(2 * np.pi * 2 * t))) / 2
+        buf = io.BytesIO()
+        sf.write(buf, tone.astype(np.float32), sr, format="WAV")
+        started = time.time()
+        _analyze_audio_serialized(buf.getvalue(), "wav", ticket=f"warmup-{uuid.uuid4().hex}")
+        print(f"audio analyzer warmed up in {time.time() - started:.1f}s", flush=True)
+    except Exception as exc:  # noqa: BLE001 - warm-up is only an optimization
+        print(f"audio analyzer warm-up skipped: {exc}", flush=True)
+
+
+def _run_pipeline(audio_bytes, audio_format, description="", song=None, report=lambda stage: None, ticket=None):
     """DSP -> GPT listening pass -> image generation. Calls report(stage) as
-    each step starts so the browser can show live progress. Raises ValueError
-    if the audio itself can't be analyzed; GPT/image failures degrade into
-    warnings instead."""
+    each step starts so the browser can show live progress ("queued" while
+    waiting for the analyzer). Raises ValueError if the audio itself can't be
+    analyzed; GPT/image failures degrade into warnings instead.
+
+    Pass the audio bytes as the only reference to them (not also held by the
+    caller): they're released once GPT has listened, so tracks waiting on
+    image generation don't keep their uploads in memory."""
     warnings = []
 
-    report("measuring")
+    report("queued")
     try:
-        dsp = _analyze_audio_serialized(audio_bytes, audio_format)
+        dsp = _analyze_audio_serialized(
+            audio_bytes, audio_format, ticket or uuid.uuid4().hex, on_start=lambda: report("measuring")
+        )
     except Exception as exc:  # noqa: BLE001 - surface DSP failures (corrupt/short file, etc.)
         raise ValueError(f"Audio analysis failed: {exc}") from exc
 
     report("listening")
     gpt, gpt_warning = _get_gpt_analysis(audio_bytes, audio_format, dsp, description)
+    del audio_bytes
     if gpt_warning:
         warnings.append(gpt_warning)
 
@@ -439,38 +508,95 @@ def _run_pipeline(audio_bytes, audio_format, description="", song=None, report=l
     }
 
 
-# In-memory job store for background analyses. Fine for a single dev-server
-# process; a multi-worker deployment would need Redis or the database instead.
+# In-memory job store for background analyses. Fine for a single server
+# process (see render.yaml); a multi-worker deployment would need Redis or
+# the database instead. A job is kept until it has gone unused for
+# JOB_TTL_SEC.
 JOB_TTL_SEC = 60 * 60
+# How many tracks may be in progress at once across all listeners. Further
+# uploads get a friendly "busy, try again shortly" instead of piling up
+# until the server runs out of memory and restarts (losing everyone's work).
+MAX_ACTIVE_JOBS = int(os.environ.get("MAX_ACTIVE_JOBS", "5"))
+ACTIVE_STAGES = {"queued", "measuring", "listening", "generating"}
 _jobs = {}
 _jobs_lock = threading.Lock()
+
+# Artwork versions are written to files here rather than held in memory:
+# each is a 1-2 MB PNG and every edit adds another.
+_ARTWORK_DIR = tempfile.mkdtemp(prefix="aura-artwork-")
+
+
+def _store_version(job_id, png, label):
+    path = os.path.join(_ARTWORK_DIR, f"{job_id}-{uuid.uuid4().hex}.png")
+    with open(path, "wb") as fh:
+        fh.write(png)
+    return {"path": path, "label": label}
+
+
+def _version_png(version):
+    with open(version["path"], "rb") as fh:
+        return fh.read()
 
 
 def _prune_jobs():
     cutoff = time.time() - JOB_TTL_SEC
     with _jobs_lock:
-        for job_id in [j for j, job in _jobs.items() if job["created"] < cutoff]:
-            del _jobs[job_id]
+        expired = [
+            job_id for job_id, job in _jobs.items()
+            if job["touched"] < cutoff and job["stage"] not in ACTIVE_STAGES
+            and not job.get("editing") and not job.get("filming")
+        ]
+        removed = [_jobs.pop(job_id) for job_id in expired]
+    for job in removed:
+        for version in job.get("versions") or []:
+            try:
+                os.remove(version["path"])
+            except OSError:
+                pass
+        if job.get("ai_video"):
+            try:
+                os.remove(job["ai_video"])
+            except OSError:
+                pass
+
+
+JOB_GONE_MESSAGE = (
+    "This artwork is no longer on the server. Unsaved artworks are cleared "
+    "after an hour without activity, or when the server restarts. If it's "
+    "still showing, download it with ⬇️ Save, or analyze the track again."
+)
+
+
+def _find_job(job_id):
+    """The signed-in user's job (marking it as recently used), or None."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None or job["user_id"] != session.get("user_id"):
+            return None
+        job["touched"] = time.time()
+        return job
 
 
 def _get_job_or_404(job_id):
-    with _jobs_lock:
-        job = _jobs.get(job_id)
-    if job is None or job["user_id"] != session.get("user_id"):
+    job = _find_job(job_id)
+    if job is None:
         abort(404)
     return job
 
 
-def _run_job(job_id, audio_bytes, audio_format, description, song):
+def _run_job(job_id, upload, audio_format, description, song):
+    """upload is {"audio": bytes}; the bytes are handed to the pipeline as
+    its only reference so they can be freed partway through."""
     def report(stage):
         with _jobs_lock:
             _jobs[job_id]["stage"] = stage
 
     try:
-        result = _run_pipeline(audio_bytes, audio_format, description, song, report)
+        result = _run_pipeline(upload.pop("audio"), audio_format, description, song, report, ticket=job_id)
         # Each edit appends a version; version 0 is the original artwork.
         artwork_png = result.pop("artwork_png")
-        versions = [{"png": artwork_png, "label": "Original"}] if artwork_png else []
+        versions = [_store_version(job_id, artwork_png, "Original")] if artwork_png else []
+        del artwork_png
         with _jobs_lock:
             _jobs[job_id].update(stage="done", result=result, versions=versions)
     except Exception as exc:  # noqa: BLE001 - report any failure back to the browser
@@ -576,22 +702,34 @@ def analyze_start():
     _prune_jobs()
     job_id = uuid.uuid4().hex
     with _jobs_lock:
+        active = [job for job in _jobs.values() if job["stage"] in ACTIVE_STAGES]
+        if any(job["user_id"] == session["user_id"] for job in active):
+            return jsonify(error="You already have a track being analyzed. Let it finish, then try the next one."), 429
+        if len(active) >= MAX_ACTIVE_JOBS:
+            return jsonify(error="AURA is busy with other listeners' tracks right now. Please try again in a minute or two."), 503
+        now = time.time()
         _jobs[job_id] = {
             "user_id": session["user_id"],
             "stage": "queued",
-            "created": time.time(),
+            "created": now,
+            "touched": now,
             "result": None,
             "error": None,
         }
-    threading.Thread(target=_run_job, args=(job_id, audio_bytes, audio_format, description, song), daemon=True).start()
+    threading.Thread(
+        target=_run_job, args=(job_id, {"audio": audio_bytes}, audio_format, description, song), daemon=True
+    ).start()
     return jsonify(job_id=job_id), 202
 
 
 @app.route("/analyze/status/<job_id>")
 @login_required
 def analyze_status(job_id):
-    job = _get_job_or_404(job_id)
-    return jsonify(stage=job["stage"], error=job["error"], has_image=bool(job.get("versions")))
+    job = _find_job(job_id)
+    if job is None:
+        return jsonify(stage="error", error=JOB_GONE_MESSAGE), 404
+    ahead = _dsp_queue_position(job_id) if job["stage"] == "queued" else None
+    return jsonify(stage=job["stage"], error=job["error"], has_image=bool(job.get("versions")), ahead=ahead)
 
 
 @app.route("/analyze/image/<job_id>/<int:version>.png")
@@ -601,7 +739,7 @@ def analyze_image(job_id, version):
     versions = job.get("versions") or []
     if version >= len(versions):
         abort(404)
-    return app.response_class(versions[version]["png"], mimetype="image/png")
+    return send_file(versions[version]["path"], mimetype="image/png")
 
 
 @app.route("/analyze/edit/<job_id>", methods=["POST"])
@@ -610,7 +748,9 @@ def analyze_edit(job_id):
     """Two ways to edit: mode=text (a written instruction) or mode=sketch (the
     browser sends the artwork with the user's marks flattened onto it, plus an
     optional note on what the marks should become)."""
-    job = _get_job_or_404(job_id)
+    job = _find_job(job_id)
+    if job is None:
+        return jsonify(error=JOB_GONE_MESSAGE), 410
     versions = job.get("versions") or []
     if not versions:
         return jsonify(error="This artwork can't be edited."), 400
@@ -623,7 +763,7 @@ def analyze_edit(job_id):
         base_version = -1
     if not 0 <= base_version < len(versions):
         return jsonify(error="Unknown version to edit."), 400
-    base_png = versions[base_version]["png"]
+    base_png = _version_png(versions[base_version])
 
     mode = request.form.get("mode")
     note = (request.form.get("prompt") or "").strip()[:1000]
@@ -658,14 +798,71 @@ def analyze_edit(job_id):
     if error:
         return jsonify(error=error), 502
 
+    stored = _store_version(job_id, edited_png, label)
     with _jobs_lock:
-        versions.append({"png": edited_png, "label": label})
+        versions.append(stored)
         version = len(versions) - 1
     return jsonify(
         version=version,
         label=label,
         url=url_for("analyze_image", job_id=job_id, version=version),
     )
+
+
+@app.route("/analyze/ai-video/<job_id>", methods=["POST"])
+@login_required
+def analyze_ai_video(job_id):
+    """A short Google video clip that opens on the chosen artwork version,
+    with its motion directed by the browser's measurements of the song. The
+    browser then replaces the clip's sound with the song itself. Each one
+    costs money, so only one runs per artwork at a time."""
+    job = _find_job(job_id)
+    if job is None:
+        return jsonify(error=JOB_GONE_MESSAGE), 410
+    versions = job.get("versions") or []
+    try:
+        version = int(request.form.get("version", len(versions) - 1))
+    except ValueError:
+        version = -1
+    if not 0 <= version < len(versions):
+        return jsonify(error="AI video needs a generated artwork image."), 400
+    music = parse_music(request.form.get("music"))
+    if music is None:
+        return jsonify(error="Couldn't read the song's timing. Please try again."), 400
+
+    with _jobs_lock:
+        if job.get("filming"):
+            return jsonify(error="An AI video is already being made for this artwork."), 409
+        job["filming"] = True
+    try:
+        mood = (job.get("result") or {}).get("analysis", {}).get("mood", "")
+        mp4, error = generate_video(_version_png(versions[version]), music, "" if mood == "unknown" else mood)
+    finally:
+        with _jobs_lock:
+            job["filming"] = False
+    if error:
+        return jsonify(error=error), 502
+
+    path = os.path.join(_ARTWORK_DIR, f"{job_id}-{uuid.uuid4().hex}.mp4")
+    with open(path, "wb") as fh:
+        fh.write(mp4)
+    with _jobs_lock:
+        old, job["ai_video"] = job.get("ai_video"), path
+    if old:
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+    return jsonify(url=url_for("analyze_ai_video_file", job_id=job_id, v=uuid.uuid4().hex[:8]))
+
+
+@app.route("/analyze/ai-video/<job_id>.mp4")
+@login_required
+def analyze_ai_video_file(job_id):
+    job = _get_job_or_404(job_id)
+    if not job.get("ai_video"):
+        abort(404)
+    return send_file(job["ai_video"], mimetype="video/mp4")
 
 
 MAX_TITLE_CHARS = 120
@@ -710,18 +907,21 @@ def board_save():
     """Saves the chosen version of an Analyze result to the artist's board,
     as a draft or published. Posting again with artwork_id updates that
     artwork instead of creating a new one."""
-    job = _get_job_or_404(request.form.get("job_id", ""))
-    if job["stage"] != "done":
-        abort(404)
-
     title, description = _read_artwork_details()
     publish = request.form.get("action") == "publish"
 
-    def fail(message):
+    def fail(message, status=400):
         if _wants_json():
-            return jsonify(error=message), 400
+            return jsonify(error=message), status
         flash(message, "error")
         return redirect(url_for("analyze", job=request.form.get("job_id")))
+
+    job = _find_job(request.form.get("job_id", ""))
+    if job is None or job["stage"] != "done":
+        if _wants_json():
+            return jsonify(error=JOB_GONE_MESSAGE), 410
+        flash(JOB_GONE_MESSAGE, "error")
+        return redirect(url_for("analyze"))
 
     if publish and not title:
         return fail("Give your artwork a title before publishing it.")
@@ -733,7 +933,7 @@ def board_save():
             version = len(versions) - 1
         if not 0 <= version < len(versions):
             return fail("Unknown version to save.")
-        image, image_mime = versions[version]["png"], "image/png"
+        image, image_mime = _version_png(versions[version]), "image/png"
     elif job["result"].get("artwork_svg"):
         image, image_mime = job["result"]["artwork_svg"].encode("utf-8"), "image/svg+xml"
     else:
@@ -761,6 +961,11 @@ def board_save():
             artwork_id = store.create_artwork(g.user, title, description, summary, publish, image, image_mime)
     except ValueError as exc:
         return fail(str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - database outages etc.; keep the artwork on the page
+        print(f"saving artwork failed: {exc!r}", flush=True)
+        return fail("Couldn't reach the database to save your artwork. Please try again in a moment.", 502)
 
     message = "Published to the gallery." if publish else "Saved to your board as a draft."
     if _wants_json():
@@ -853,6 +1058,10 @@ def artwork_image(artwork_id):
 @app.route("/gallery")
 def gallery():
     return render_template("gallery.html", artworks=_for_display(store.list_artworks(published_only=True)))
+
+
+if os.environ.get("AURA_SKIP_WARMUP") != "1":
+    threading.Thread(target=_warm_up_analyzer, daemon=True).start()
 
 
 if __name__ == "__main__":

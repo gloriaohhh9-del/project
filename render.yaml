@@ -25,5 +25,11 @@ services:
         sync: false # paste the service-account JSON in the Render dashboard
       - key: OPENAI_API_KEY
         sync: false # entered in the Render dashboard, never committed
+      - key: GEMINI_API_KEY
+        sync: false # Google key for the 8-second AI video; entered in the Render dashboard
       - key: IMAGE_QUALITY
         value: high
+      # Tracks allowed in progress at once; more uploads get a "busy, try
+      # again shortly" message instead of overloading the server.
+      - key: MAX_ACTIVE_JOBS
+        value: "5"

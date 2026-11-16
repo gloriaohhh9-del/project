@@ -20,9 +20,17 @@ import soundfile as sf
 import soxr
 
 SAMPLE_RATE = 22050
-# Memory grows with track length, so very long tracks are measured from
-# their first 6 minutes (the reported duration is still the full length).
-MAX_ANALYSIS_SEC = 6 * 60
+# Tracks are measured from a few excerpts spread across the song instead of
+# end to end: tempo, key, and timbre settle within seconds, and on a small
+# shared server every extra minute of audio is a long wait for the listener.
+# A track up to EXCERPT_SEC * MAX_EXCERPTS (+ a little slack) is analyzed
+# whole; longer ones are sampled at the start, middle, and end regions. The
+# reported duration is always the full length.
+EXCERPT_SEC = 30
+MAX_EXCERPTS = 3
+WHOLE_TRACK_SLACK_SEC = 15
+# Excerpts are joined with a short fade so the seams don't read as beats.
+SEAM_FADE_SEC = 0.05
 ENERGY_SEGMENTS = 48  # slices around the "energy fingerprint" ring
 HOP_LENGTH = 512
 MIN_NOTE_EVENTS = 24
@@ -45,14 +53,16 @@ _FIFTHS_POSITION = [(i * 7) % 12 for i in range(12)]
 
 _SECTION_SIMILARITY_THRESHOLD = 0.82
 
-# The heaviest steps (constant-Q chroma, harmonic/percussive separation) run
-# over the track in pieces of this many frames (~48 s) so memory stays flat
-# however long the song is.
+# Spectral steps run in pieces of this many frames (~48 s) so memory stays
+# flat.
 CHUNK_FRAMES = 2048
-# Constant-Q chroma and HPSS are the heaviest per frame, so they use smaller
-# pieces (~24 s and ~12 s).
-CQT_CHUNK_FRAMES = 1024
+# Harmonic/percussive separation (median filtering) is the slowest step per
+# frame. Only the overall harmonic:percussive ratio is used, so it runs on
+# pieces of ~12 s spread evenly over the audio, ~36 s in total.
 HPSS_CHUNK_FRAMES = 512
+HPSS_MAX_FRAMES = 3 * HPSS_CHUNK_FRAMES
+# Frames used to estimate the recording's tuning offset for chroma.
+TUNING_FRAMES = 1024
 
 
 def _clamp01(value):
@@ -147,39 +157,76 @@ def _segment_structure(chroma, mfcc, rms, centroid, n_frames, duration_sec):
     return sections
 
 
+def _excerpt_spans(total_sec):
+    """(start_sec, length_sec) of each excerpt to analyze: the whole track
+    when it's short, otherwise MAX_EXCERPTS evenly spaced windows."""
+    if total_sec <= EXCERPT_SEC * MAX_EXCERPTS + WHOLE_TRACK_SLACK_SEC:
+        return [(0.0, total_sec)]
+    spans = []
+    for i in range(MAX_EXCERPTS):
+        center = total_sec * (i + 0.5) / MAX_EXCERPTS
+        start = max(0.0, min(total_sec - EXCERPT_SEC, center - EXCERPT_SEC / 2))
+        spans.append((start, float(EXCERPT_SEC)))
+    return spans
+
+
+def _join_excerpts(parts, sr):
+    """Concatenates (channels, samples) excerpts with a short fade at each
+    seam so the cut doesn't register as an onset."""
+    if len(parts) == 1:
+        return parts[0]
+    fade = int(sr * SEAM_FADE_SEC)
+    for i, part in enumerate(parts):
+        n = min(fade, part.shape[-1] // 2)
+        if n == 0:
+            continue
+        ramp = np.linspace(0.0, 1.0, n, dtype=np.float32)
+        if i > 0:
+            part[..., :n] *= ramp
+        if i < len(parts) - 1:
+            part[..., -n:] *= ramp[::-1]
+    return np.concatenate(parts, axis=-1)
+
+
 def _load_audio(file_bytes):
-    """Same result as librosa.load(sr=SAMPLE_RATE, mono=False,
-    duration=MAX_ANALYSIS_SEC), but decodes and resamples in 10-second
-    blocks so the full-rate decode never sits in memory at once. Returns
-    (y, sr, full_duration_sec)."""
+    """Decodes only the excerpts chosen by _excerpt_spans, resampled to
+    SAMPLE_RATE. Returns (y, sr, full_duration_sec), where y is
+    (channels, samples) for stereo or (samples,) for mono."""
     try:
         f = sf.SoundFile(io.BytesIO(file_bytes))
     except sf.LibsndfileError:
+        # Formats libsndfile can't open go through librosa's slower decoder.
         full_duration = librosa.get_duration(path=io.BytesIO(file_bytes))
-        y, sr = librosa.load(io.BytesIO(file_bytes), sr=SAMPLE_RATE, mono=False, duration=MAX_ANALYSIS_SEC)
-        return y, sr, full_duration
+        parts = [
+            np.atleast_2d(librosa.load(io.BytesIO(file_bytes), sr=SAMPLE_RATE, mono=False, offset=start, duration=length)[0])
+            for start, length in _excerpt_spans(full_duration)
+        ]
+        y = _join_excerpts(parts, SAMPLE_RATE)
+        return (y[0] if y.shape[0] == 1 else y), SAMPLE_RATE, full_duration
 
     with f:
         native_sr, channels = f.samplerate, f.channels
         full_duration = f.frames / native_sr if f.frames > 0 else 0.0
-        frames = min(f.frames, MAX_ANALYSIS_SEC * native_sr) if f.frames > 0 else 0
-        stream = None
-        if native_sr != SAMPLE_RATE:
-            stream = soxr.ResampleStream(native_sr, SAMPLE_RATE, channels, dtype="float32", quality="HQ")
+        if full_duration <= 0 or not f.seekable():
+            # Unknown length or no seeking: read from the start instead.
+            spans = [(0.0, float(EXCERPT_SEC * MAX_EXCERPTS))]
+        else:
+            spans = _excerpt_spans(full_duration)
         parts = []
-        for block in f.blocks(blocksize=native_sr * 10, dtype="float32", always_2d=True, frames=frames or -1):
-            parts.append(stream.resample_chunk(block) if stream else block)
-        if stream:
-            parts.append(stream.resample_chunk(np.zeros((0, channels), dtype=np.float32), last=True))
+        for start, length in spans:
+            if start > 0:
+                f.seek(int(start * native_sr))
+            block = f.read(frames=int(math.ceil(length * native_sr)), dtype="float32", always_2d=True)
+            if len(block) == 0:
+                continue
+            if native_sr != SAMPLE_RATE:
+                block = soxr.resample(block, native_sr, SAMPLE_RATE, quality="HQ")
+            parts.append(np.ascontiguousarray(block.T))
+            del block
 
-    y = np.empty((channels, sum(len(p) for p in parts)), dtype=np.float32)
-    pos = 0
-    while parts:
-        part = parts.pop(0)
-        y[:, pos:pos + len(part)] = part.T
-        pos += len(part)
-    if stream and frames > 0:
-        y = librosa.util.fix_length(y, size=math.ceil(frames * SAMPLE_RATE / native_sr))
+    if not parts:
+        raise ValueError("No audio could be decoded from this file.")
+    y = _join_excerpts(parts, SAMPLE_RATE)
     return (y[0] if channels == 1 else y), SAMPLE_RATE, full_duration or y.shape[-1] / SAMPLE_RATE
 
 
@@ -238,32 +285,33 @@ def _rms(y, hop_length, frame_length=2048):
     return rms
 
 
-def _chroma_cqt_chunked(y, sr, hop_length):
-    """chroma_cqt over the whole track, computed piecewise. Pieces are
-    hop-aligned so their frames line up exactly with the other features'
-    frames; a short tail is folded into the last piece rather than analyzed
-    on its own."""
-    step = CQT_CHUNK_FRAMES * hop_length
-    parts = []
-    start = 0
-    while start < len(y):
-        end = start + step
-        if len(y) - end < step // 2:
-            end = len(y)
-        chroma = librosa.feature.chroma_cqt(y=y[start:end], sr=sr, hop_length=hop_length)
-        # Each centered piece has one extra trailing frame that belongs to
-        # the next piece.
-        parts.append(chroma if end == len(y) else chroma[:, : (end - start) // hop_length])
-        start = end
-    return np.concatenate(parts, axis=1)
+def _chroma_from_spec(spec, sr):
+    """Pitch-class energy per frame from the shared magnitude spectrogram.
+    This replaced a constant-Q chroma, which recomputed its own transform
+    from the audio and was the slowest step of the analysis; for picking a
+    key from the track-wide average the two agree closely. The tuning
+    offset is estimated once rather than per piece so pieces stay consistent."""
+    tuning = librosa.estimate_tuning(S=spec[:, :TUNING_FRAMES], sr=sr)
+    return np.concatenate(
+        [
+            librosa.feature.chroma_stft(S=spec[:, start:start + CHUNK_FRAMES] ** 2, sr=sr, tuning=tuning)
+            for start in range(0, spec.shape[1], CHUNK_FRAMES)
+        ],
+        axis=1,
+    )
 
 
 def _harmonic_percussive_energy(spec):
-    """Total harmonic and percussive energy, from HPSS on the magnitude
-    spectrogram piece by piece (its median filters span only ~31 frames, so
-    piece boundaries barely matter)."""
+    """Harmonic and percussive energy from HPSS on the magnitude
+    spectrogram, run on up to HPSS_MAX_FRAMES worth of evenly spread pieces
+    (its median filters span only ~31 frames, so piece boundaries barely
+    matter, and only the ratio of the two is used)."""
+    starts = list(range(0, spec.shape[1], HPSS_CHUNK_FRAMES))
+    max_pieces = HPSS_MAX_FRAMES // HPSS_CHUNK_FRAMES
+    if len(starts) > max_pieces:
+        starts = [starts[int(i)] for i in np.linspace(0, len(starts) - 1, max_pieces)]
     harmonic = percussive = 0.0
-    for start in range(0, spec.shape[1], HPSS_CHUNK_FRAMES):
+    for start in starts:
         h, p = librosa.decompose.hpss(spec[:, start:start + HPSS_CHUNK_FRAMES])
         harmonic += float(np.sum(h ** 2))
         percussive += float(np.sum(p ** 2))
@@ -342,7 +390,7 @@ def analyze_audio(file_bytes, audio_format):
     timbre_sharpness = _clamp01(float(np.mean(flatness)) * 6.0)
 
     # --- Key, mode, and full harmonic fingerprint ---
-    chroma = _chroma_cqt_chunked(y, sr, hop_length)
+    chroma = _chroma_from_spec(spec, sr)
     chroma_mean = chroma.mean(axis=1)
     root, mode = _estimate_key(chroma_mean)
     key_name = f"{_PITCH_CLASSES[root]} {mode.capitalize()}"
