@@ -27,6 +27,10 @@ services:
         sync: false # entered in the Render dashboard, never committed
       - key: GEMINI_API_KEY
         sync: false # Google key for the 8-second AI video; entered in the Render dashboard
+      # Turns on "Continue with Google": the Web API key from Firebase
+      # console > Project settings > Your apps > Web app.
+      - key: FIREBASE_WEB_API_KEY
+        sync: false
       - key: IMAGE_QUALITY
         value: high
       # Tracks allowed in progress at once; more uploads get a "busy, try

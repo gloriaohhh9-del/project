@@ -16,12 +16,7 @@
         <a href="{{ url_for('analyze') }}" class="navbar-analyze-btn">🎧 Analyze</a>
       </div>
 
-      <ul class="navbar-menu" id="navbar-menu">
-        <li><a href="{{ url_for('index') }}">Home</a></li>
-        <li><a href="{{ url_for('board') }}">My Board</a></li>
-        <li><a href="{{ url_for('gallery') }}">Gallery</a></li>
-        <li><a href="{{ url_for('logout') }}" class="navbar-cta">Log Out</a></li>
-      </ul>
+      {% with active = '' %}{% include "_nav_menu.html" %}{% endwith %}
     </div>
   </nav>
 

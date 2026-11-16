@@ -2122,3 +2122,430 @@ footer a {
   color: #67e8f9;
   overflow-wrap: anywhere;
 }
+
+/* --- Shared helpers --- */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.form-optional {
+  font-weight: 400;
+  color: #606078;
+}
+
+/* --- Google sign-in --- */
+.google-signin {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.google-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7rem;
+  width: 100%;
+  padding: 0.8rem 1.25rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: #f0f0f5;
+  color: #1f1f2b;
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+.google-btn:hover:not(:disabled) {
+  background: #ffffff;
+  transform: translateY(-1px);
+}
+
+.google-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.google-logo {
+  width: 1.15rem;
+  height: 1.15rem;
+  flex-shrink: 0;
+}
+
+.google-signin-error {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #f472b6;
+  text-align: center;
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  margin: 1.5rem 0;
+  font-size: 0.8rem;
+  color: #606078;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* --- Account page --- */
+.account-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 0.9rem;
+}
+
+.account-facts div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.account-facts dt {
+  color: #9090a8;
+}
+
+.account-facts dd {
+  color: #e8e8f0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/* --- Likes and comment counts on artwork cards --- */
+.art-card-title a {
+  color: inherit;
+}
+
+.art-card-title a:hover {
+  color: #a78bfa;
+}
+
+.art-card-social {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: auto;
+  padding-top: 0.5rem;
+}
+
+.like-form {
+  display: contents;
+}
+
+.like-btn,
+.social-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: #c8c8d4;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.like-btn:hover:not(.is-static),
+.social-count:hover {
+  border-color: rgba(244, 114, 182, 0.4);
+  color: #f0f0f5;
+}
+
+.social-count:hover {
+  border-color: rgba(103, 232, 249, 0.4);
+}
+
+.like-heart {
+  font-size: 1rem;
+  line-height: 1;
+  color: #606078;
+  transition: color 0.2s ease, transform 0.2s ease;
+}
+
+.like-btn.is-liked {
+  background: rgba(244, 114, 182, 0.12);
+  border-color: rgba(244, 114, 182, 0.4);
+  color: #f9a8d4;
+}
+
+.like-btn.is-liked .like-heart {
+  color: #f472b6;
+  transform: scale(1.12);
+}
+
+.like-btn.is-static {
+  cursor: default;
+}
+
+.like-btn.is-error {
+  border-color: rgba(244, 114, 182, 0.8);
+}
+
+.like-btn:disabled {
+  opacity: 0.7;
+}
+
+.art-card-reactions a {
+  color: #9090a8;
+}
+
+.art-card-reactions a:hover {
+  color: #f0f0f5;
+}
+
+/* --- Artwork page --- */
+.art-page {
+  max-width: 1100px;
+}
+
+.art-back {
+  display: inline-block;
+  margin-bottom: 1.25rem;
+  font-size: 0.9rem;
+  color: #9090a8;
+}
+
+.art-back:hover {
+  color: #f0f0f5;
+}
+
+.art-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 2.25rem;
+  align-items: start;
+}
+
+.art-detail-image {
+  display: block;
+  overflow: hidden;
+  border-radius: 1.1rem;
+  background: #0d0d18;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.4);
+}
+
+.art-detail-image img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.art-detail-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.art-detail-info .analysis-song {
+  margin-bottom: 0;
+}
+
+.art-detail-title {
+  font-size: clamp(1.9rem, 4vw, 2.6rem);
+  margin-bottom: 0;
+  overflow-wrap: anywhere;
+}
+
+.art-detail-info .art-card-artist {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.art-detail-description {
+  margin: 0;
+  line-height: 1.65;
+  color: #c8c8d4;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.art-detail-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.75rem 1.25rem;
+  margin: 0.25rem 0 0;
+  font-size: 0.875rem;
+}
+
+.art-detail-facts dt {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #606078;
+}
+
+.art-detail-facts dd {
+  color: #e8e8f0;
+  overflow-wrap: anywhere;
+}
+
+.art-detail-social {
+  margin-top: 0.5rem;
+  padding-top: 0;
+}
+
+.art-detail-social .like-btn,
+.art-detail-social .social-count {
+  padding: 0.5rem 1.1rem;
+  font-size: 0.95rem;
+}
+
+.art-manage {
+  align-self: flex-start;
+  margin-top: 0.25rem;
+}
+
+/* --- Comments --- */
+.comments {
+  max-width: 720px;
+  margin-top: 3rem;
+}
+
+.comments h2 {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 1.5rem;
+  margin-bottom: 1rem;
+}
+
+.comments-count {
+  font-size: 1rem;
+  color: #606078;
+}
+
+.comment-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.comment {
+  padding: 0.9rem 1.1rem;
+  border-radius: 0.9rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  scroll-margin-top: 6rem;
+}
+
+.comment:target {
+  border-color: rgba(167, 139, 250, 0.45);
+}
+
+.comment-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.85rem;
+}
+
+.comment-author {
+  font-weight: 600;
+  color: #a78bfa;
+}
+
+.comment-badge {
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: rgba(103, 232, 249, 0.12);
+  color: #67e8f9;
+}
+
+.comment-date {
+  color: #606078;
+  font-size: 0.78rem;
+}
+
+.comment-delete {
+  margin-left: auto;
+}
+
+.comment-delete-btn {
+  border: none;
+  background: none;
+  color: #606078;
+  font-family: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.comment-delete-btn:hover {
+  color: #f472b6;
+}
+
+.comment-text {
+  margin: 0;
+  font-size: 0.925rem;
+  line-height: 1.6;
+  color: #d8d8e4;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.comments-empty {
+  color: #9090a8;
+  font-size: 0.925rem;
+}
+
+.art-draft-note {
+  margin-top: 2rem;
+}
+
+.comment-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.comment-form .btn-primary {
+  align-self: flex-start;
+  margin-top: 0;
+  padding: 0.65rem 1.3rem;
+  font-size: 0.925rem;
+}
+
+@media (max-width: 800px) {
+  .art-detail {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+  }
+}

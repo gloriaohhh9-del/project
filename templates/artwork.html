@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ art.title or "Untitled" }} by {{ art.artist }} — AURA</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body class="auth-page">
+
+  <nav class="navbar" id="navbar">
+    <div class="navbar-inner">
+      <div class="navbar-left">
+        <a href="{{ url_for('index') }}" class="navbar-brand">AURA</a>
+        {% if g.user %}
+          <a href="{{ url_for('draw') }}" class="navbar-draw-btn">✏️ Draw</a>
+          <a href="{{ url_for('analyze') }}" class="navbar-analyze-btn">🎧 Analyze</a>
+        {% endif %}
+      </div>
+      {% with active = 'gallery' %}{% include "_nav_menu.html" %}{% endwith %}
+    </div>
+  </nav>
+
+  <main class="board-main art-page">
+    {% if art.is_published %}
+      <a class="art-back" href="{{ url_for('gallery') }}">← Gallery</a>
+    {% else %}
+      <a class="art-back" href="{{ url_for('board') }}">← My Board</a>
+    {% endif %}
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-list">
+          {% for category, message in messages %}
+            <div class="flash flash-{{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <article class="art-detail">
+      <a class="art-detail-image" href="{{ art.image_url }}" target="_blank" rel="noopener" title="Open full size">
+        <img src="{{ art.image_url }}" alt="{{ art.title or 'Untitled artwork' }}">
+      </a>
+
+      <div class="art-detail-info">
+        {% if not art.is_published %}
+          <span class="art-badge is-draft">Draft</span>
+        {% endif %}
+        <h1 class="art-detail-title">{{ art.title or "Untitled" }}</h1>
+        <p class="art-card-artist">by {{ art.artist }}</p>
+
+        {% if art.analysis.song_title %}
+          <div class="analysis-song">
+            <span class="analysis-song-label">Made from</span>
+            <span class="analysis-song-title">{{ art.analysis.song_title }}</span>
+            {% if art.analysis.song_artist %}
+              <span class="analysis-song-artist">{{ art.analysis.song_artist }}</span>
+            {% endif %}
+          </div>
+        {% endif %}
+
+        {% if art.description %}
+          <p class="art-detail-description">{{ art.description }}</p>
+        {% endif %}
+
+        <dl class="art-detail-facts">
+          {% if art.analysis.mood %}<div><dt>Mood</dt><dd>{{ art.analysis.mood }}</dd></div>{% endif %}
+          {% if art.analysis.tempo_bpm %}<div><dt>Tempo</dt><dd>{{ art.analysis.tempo_bpm }} BPM</dd></div>{% endif %}
+          {% if art.analysis.key %}<div><dt>Key</dt><dd>{{ art.analysis.key }}</dd></div>{% endif %}
+          {% if art.analysis.dominant_instruments %}<div><dt>Instruments</dt><dd>{{ art.analysis.dominant_instruments|join(", ") }}</dd></div>{% endif %}
+          <div><dt>{{ "Published" if art.is_published else "Created" }}</dt><dd>{{ art.date }}</dd></div>
+        </dl>
+
+        {% if art.is_published %}
+          <div class="art-card-social art-detail-social">
+            {% include "_like_button.html" %}
+            <a class="social-count" href="#comments">
+              <span aria-hidden="true">💬</span> {{ art.comment_count }}
+              <span class="visually-hidden">comments</span>
+            </a>
+          </div>
+        {% endif %}
+
+        {% if art.is_mine %}
+          <a class="action-btn art-manage" href="{{ url_for('board', show='published' if art.is_published else 'drafts') }}">Manage on My Board</a>
+        {% endif %}
+      </div>
+    </article>
+
+    {% if art.is_published %}
+      <section class="comments" id="comments" aria-labelledby="comments-heading">
+        <h2 id="comments-heading">Comments <span class="comments-count">{{ comments|length }}</span></h2>
+
+        {% if comments %}
+          <ol class="comment-list">
+            {% for comment in comments %}
+              <li class="comment" id="comment-{{ comment.id }}">
+                <div class="comment-header">
+                  <span class="comment-author">{{ comment.author }}</span>
+                  {% if comment.by_artist %}<span class="comment-badge">Artist</span>{% endif %}
+                  <time class="comment-date">{{ comment.date }}</time>
+                  {% if comment.can_delete %}
+                    <form method="post" action="{{ url_for('comment_delete', comment_id=comment.id) }}" class="comment-delete"
+                          onsubmit="return confirm('Delete this comment?');">
+                      <button type="submit" class="comment-delete-btn">Delete</button>
+                    </form>
+                  {% endif %}
+                </div>
+                <p class="comment-text">{{ comment.text }}</p>
+              </li>
+            {% endfor %}
+          </ol>
+        {% else %}
+          <p class="comments-empty">No comments yet. Tell {{ art.artist }} what you think!</p>
+        {% endif %}
+
+        {% if g.user %}
+          <form class="comment-form" method="post" action="{{ url_for('artwork_comment', artwork_id=art.id) }}">
+            <div class="form-group">
+              <label for="comment-text">Add a comment as {{ g.user.display_name }}</label>
+              <textarea id="comment-text" name="text" rows="3" maxlength="{{ max_comment }}" required
+                        placeholder="What does this piece make you feel?"></textarea>
+            </div>
+            <button type="submit" class="btn-primary">Post comment</button>
+          </form>
+        {% else %}
+          <p class="comments-empty"><a href="{{ url_for('login') }}">Log in</a> or <a href="{{ url_for('signup') }}">sign up</a> to join the conversation.</p>
+        {% endif %}
+      </section>
+    {% else %}
+      <p class="comments-empty art-draft-note">This is a draft, so only you can see it. Publish it from My Board to let other artists like and comment on it.</p>
+    {% endif %}
+  </main>
+
+  <script src="{{ url_for('static', filename='js/likes.js') }}"></script>
+</body>
+</html>

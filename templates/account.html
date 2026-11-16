@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Account — AURA</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body class="auth-page">
+
+  <nav class="navbar" id="navbar">
+    <div class="navbar-inner">
+      <div class="navbar-left">
+        <a href="{{ url_for('index') }}" class="navbar-brand">AURA</a>
+        <a href="{{ url_for('draw') }}" class="navbar-draw-btn">✏️ Draw</a>
+        <a href="{{ url_for('analyze') }}" class="navbar-analyze-btn">🎧 Analyze</a>
+      </div>
+      {% with active = 'account' %}{% include "_nav_menu.html" %}{% endwith %}
+    </div>
+  </nav>
+
+  <main class="auth-main">
+    <div class="auth-card">
+      <h1>Your Account</h1>
+      <p class="auth-subtitle">Your nickname is the name other artists see on your art and comments.</p>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          <div class="flash-list">
+            {% for category, message in messages %}
+              <div class="flash flash-{{ category }}">{{ message }}</div>
+            {% endfor %}
+          </div>
+        {% endif %}
+      {% endwith %}
+
+      <form class="auth-form" method="post" action="{{ url_for('account') }}">
+        <div class="form-group">
+          <label for="nickname">Nickname</label>
+          <input type="text" id="nickname" name="nickname" value="{{ account.nickname }}"
+                 maxlength="{{ max_nickname }}" placeholder="{{ account.username }}" autocomplete="nickname">
+          <span class="form-hint">Leave it empty to show your username instead.</span>
+        </div>
+        <button type="submit" class="btn-primary">Save nickname</button>
+      </form>
+
+      <dl class="account-facts">
+        <div><dt>Username</dt><dd>{{ account.username }}</dd></div>
+        <div><dt>Email</dt><dd>{{ account.email }}</dd></div>
+        <div><dt>Sign-in</dt><dd>
+          {%- if account.has_password and account.google_linked %}Password or Google
+          {%- elif account.google_linked %}Google
+          {%- else %}Password{% endif -%}
+        </dd></div>
+      </dl>
+    </div>
+  </main>
+
+</body>
+</html>

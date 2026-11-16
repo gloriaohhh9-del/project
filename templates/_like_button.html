@@ -1,0 +1,27 @@
+{# Like button for one artwork (`art`, prepared by _for_display). Signed-in
+   visitors can toggle it; artists see their own count; logged-out visitors
+   are sent to log in. static/js/likes.js upgrades it to update in place. #}
+{% if g.user and not art.is_mine %}
+  <form class="like-form" method="post" action="{{ url_for('artwork_like', artwork_id=art.id) }}">
+    <input type="hidden" name="next" value="{{ request.full_path if request.query_string else request.path }}">
+    <button type="submit" class="like-btn{% if art.liked %} is-liked{% endif %}"
+            aria-pressed="{{ 'true' if art.liked else 'false' }}"
+            title="{{ 'Unlike' if art.liked else 'Like' }}">
+      <span class="like-heart" aria-hidden="true">♥</span>
+      <span class="like-count">{{ art.like_count }}</span>
+      <span class="visually-hidden">likes</span>
+    </button>
+  </form>
+{% elif g.user %}
+  <span class="like-btn is-static" title="Likes on your artwork">
+    <span class="like-heart" aria-hidden="true">♥</span>
+    <span class="like-count">{{ art.like_count }}</span>
+    <span class="visually-hidden">likes</span>
+  </span>
+{% else %}
+  <a class="like-btn" href="{{ url_for('login') }}" title="Log in to like this artwork">
+    <span class="like-heart" aria-hidden="true">♥</span>
+    <span class="like-count">{{ art.like_count }}</span>
+    <span class="visually-hidden">likes</span>
+  </a>
+{% endif %}

@@ -31,6 +31,9 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
 # Only send the login cookie over HTTPS when deployed behind it.
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE") == "1"
+# Browsers don't send the login cookie with form posts from other sites, so
+# another page can't like, comment, or delete on a signed-in user's behalf.
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["MAX_CONTENT_LENGTH"] = 15 * 1024 * 1024  # 15 MB upload limit
 
 
@@ -44,6 +47,14 @@ def _static_version(endpoint, values):
             values["v"] = int(os.stat(os.path.join(app.static_folder, values["filename"])).st_mtime)
         except OSError:
             pass
+
+
+# Google sign-in runs through Firebase Authentication. It's switched on by
+# setting FIREBASE_WEB_API_KEY (Firebase console > Project settings > Your
+# apps > Web app); the project id comes from the service-account
+# credentials. Until then the Google buttons are hidden.
+FIREBASE_WEB_API_KEY = os.environ.get("FIREBASE_WEB_API_KEY", "").strip()
+MAX_NICKNAME_CHARS = 40
 
 ALLOWED_AUDIO_EXTENSIONS = {"mp3", "wav"}
 
@@ -73,14 +84,54 @@ def login_required(view):
 
 @app.before_request
 def before_request():
-    # The login stores the user's id and name in the signed session cookie,
+    # The login stores the user's id and names in the signed session cookie,
     # so ordinary page loads don't need a database round trip.
     g.user = None
     if "user_id" in session:
         if "username" not in session:
             session.clear()
         else:
-            g.user = {"id": session["user_id"], "username": session["username"]}
+            nickname = session.get("nickname") or ""
+            g.user = {
+                "id": session["user_id"],
+                "username": session["username"],
+                "nickname": nickname,
+                "display_name": nickname or session["username"],
+            }
+
+
+def _start_session(user):
+    session.clear()
+    session["user_id"] = user["id"]
+    session["username"] = user["username"]
+    session["nickname"] = user.get("nickname") or ""
+
+
+def _clean_nickname(raw):
+    return " ".join((raw or "").split())[:MAX_NICKNAME_CHARS]
+
+
+_firebase_web_config_cache = {}
+
+
+@app.context_processor
+def inject_google_signin():
+    """Firebase web settings for the Google button, or None while Google
+    sign-in isn't configured."""
+    if not FIREBASE_WEB_API_KEY:
+        return {"google_signin": None}
+    if not _firebase_web_config_cache:
+        try:
+            project = os.environ.get("FIREBASE_PROJECT_ID") or store.project_id()
+        except Exception as exc:  # noqa: BLE001 - no credentials: just hide the button
+            print(f"Google sign-in disabled: {exc}", flush=True)
+            return {"google_signin": None}
+        _firebase_web_config_cache.update(
+            apiKey=FIREBASE_WEB_API_KEY,
+            authDomain=os.environ.get("FIREBASE_AUTH_DOMAIN") or f"{project}.firebaseapp.com",
+            projectId=project,
+        )
+    return {"google_signin": dict(_firebase_web_config_cache)}
 
 
 @app.route("/")
@@ -98,6 +149,7 @@ def signup():
         email = request.form.get("email", "").strip().lower()
         password = request.form.get("password", "")
         confirm_password = request.form.get("confirm_password", "")
+        nickname = _clean_nickname(request.form.get("nickname"))
 
         errors = []
 
@@ -125,7 +177,9 @@ def signup():
             return render_template("signup.html")
 
         try:
-            store.create_user(username, email, generate_password_hash(password, method="pbkdf2:sha256"))
+            store.create_user(
+                username, email, generate_password_hash(password, method="pbkdf2:sha256"), nickname=nickname
+            )
         except store.AlreadyTaken:
             flash("Username or email is already taken.", "error")
             return render_template("signup.html")
@@ -151,17 +205,84 @@ def login():
 
         user = store.find_user_for_login(username)
 
+        if user is not None and not user["password_hash"]:
+            flash("This account signs in with Google. Use “Continue with Google” below.", "error")
+            return render_template("login.html")
+
         if user is None or not check_password_hash(user["password_hash"], password):
             flash("Invalid username or password.", "error")
             return render_template("login.html")
 
-        session.clear()
-        session["user_id"] = user["id"]
-        session["username"] = user["username"]
-        flash(f"Welcome back, {user['username']}!", "success")
+        _start_session(user)
+        flash(f"Welcome back, {user['nickname'] or user['username']}!", "success")
         return redirect(url_for("index"))
 
     return render_template("login.html")
+
+
+@app.route("/auth/google", methods=["POST"])
+def auth_google():
+    """Finishes Google sign-in: the browser signs in with Firebase and posts
+    the resulting ID token here. Signs in the linked account; otherwise links
+    the account with the same verified email; otherwise creates a new
+    account (username made up from the Google name or email, nickname from
+    the Google name)."""
+    if not FIREBASE_WEB_API_KEY:
+        return jsonify(error="Google sign-in isn't set up on this server."), 404
+    id_token = ((request.get_json(silent=True) or {}).get("id_token") or "").strip()
+    if not id_token:
+        return jsonify(error="Missing Google sign-in token."), 400
+    try:
+        claims = store.verify_google_token(id_token)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 401
+
+    google_uid = claims["uid"]
+    email = (claims.get("email") or "").strip().lower()
+    google_name = _clean_nickname(claims.get("name"))
+    if not email or not claims.get("email_verified"):
+        return jsonify(error="Your Google account needs a verified email address to sign in."), 400
+
+    created = False
+    try:
+        user = store.find_user_by_google(google_uid)
+        if user is None:
+            user = store.find_user_by_email(email)
+            if user is not None:
+                store.link_google(user["id"], google_uid)
+            else:
+                user_id = store.create_user(
+                    store.suggest_username(google_name, email.split("@")[0]),
+                    email, None, nickname=google_name, google_uid=google_uid,
+                )
+                user = store.get_user(user_id)
+                created = True
+    except store.AlreadyTaken:
+        return jsonify(error="That Google account is already linked to a different AURA account."), 409
+
+    _start_session(user)
+    name = user["nickname"] or user["username"]
+    if created:
+        flash(f"Welcome to AURA, {name}! You can change your nickname on your account page.", "success")
+    else:
+        flash(f"Welcome back, {name}!", "success")
+    return jsonify(redirect=url_for("index"))
+
+
+@app.route("/account", methods=["GET", "POST"])
+@login_required
+def account():
+    user = store.get_user(g.user["id"])
+    if user is None:
+        session.clear()
+        return redirect(url_for("login"))
+    if request.method == "POST":
+        nickname = _clean_nickname(request.form.get("nickname"))
+        store.set_nickname(user["id"], nickname)
+        session["nickname"] = nickname
+        flash("Nickname updated." if nickname else "Nickname cleared; your username will be shown instead.", "success")
+        return redirect(url_for("account"))
+    return render_template("account.html", account=user, max_nickname=MAX_NICKNAME_CHARS)
 
 
 @app.route("/logout")
@@ -974,10 +1095,18 @@ def board_save():
     return redirect(url_for("board"))
 
 
-def _for_display(artworks):
+def _for_display(artworks, liked=frozenset()):
+    """Adds what the templates show: image and page links, date, the
+    artist's current display name (nickname, else username), and whether
+    the signed-in user has liked each one."""
+    names = store.display_names(art["user_id"] for art in artworks)
     for art in artworks:
         art["image_url"] = url_for("artwork_image", artwork_id=art["id"])
+        art["page_url"] = url_for("artwork_page", artwork_id=art["id"])
         art["date"] = (art.get("published_at") or art["created_at"]).strftime("%Y-%m-%d")
+        art["artist"] = names.get(art["user_id"]) or art.get("username") or "Unknown artist"
+        art["liked"] = art["id"] in liked
+        art["is_mine"] = bool(g.user) and art["user_id"] == str(g.user["id"])
     return artworks
 
 
@@ -1057,7 +1186,121 @@ def artwork_image(artwork_id):
 
 @app.route("/gallery")
 def gallery():
-    return render_template("gallery.html", artworks=_for_display(store.list_artworks(published_only=True)))
+    liked = store.liked_artwork_ids(g.user["id"]) if g.user else frozenset()
+    return render_template("gallery.html", artworks=_for_display(store.list_artworks(published_only=True), liked))
+
+
+MAX_COMMENT_CHARS = 500
+COMMENT_COOLDOWN_SEC = 5
+_last_comment_at = {}
+_last_comment_lock = threading.Lock()
+
+
+def _viewable_artwork_or_404(artwork_id):
+    """Published artworks are public; drafts only to their artist."""
+    artwork = store.get_artwork(artwork_id)
+    if artwork is None:
+        abort(404)
+    if not artwork["is_published"] and not (g.user and artwork["user_id"] == str(g.user["id"])):
+        abort(404)
+    return artwork
+
+
+def _back_to_art(artwork_id, anchor=""):
+    return redirect(url_for("artwork_page", artwork_id=artwork_id) + anchor)
+
+
+@app.route("/art/<artwork_id>")
+def artwork_page(artwork_id):
+    artwork = _viewable_artwork_or_404(artwork_id)
+    comments = store.list_comments(artwork_id) if artwork["is_published"] else []
+    liked = {artwork_id} if g.user and store.has_liked(artwork_id, g.user["id"]) else frozenset()
+    _for_display([artwork], liked)
+    names = store.display_names(c["user_id"] for c in comments)
+    for comment in comments:
+        comment["author"] = names.get(comment["user_id"]) or comment.get("username") or "Unknown artist"
+        comment["date"] = comment["created_at"].strftime("%Y-%m-%d %H:%M")
+        comment["can_delete"] = bool(g.user) and str(g.user["id"]) in (comment["user_id"], artwork["user_id"])
+        comment["by_artist"] = comment["user_id"] == artwork["user_id"]
+    return render_template(
+        "artwork.html", art=artwork, comments=comments, max_comment=MAX_COMMENT_CHARS,
+    )
+
+
+@app.route("/art/<artwork_id>/like", methods=["POST"])
+def artwork_like(artwork_id):
+    """Toggles the signed-in user's like. Answers JSON for the page's script
+    ({liked, like_count}); plain form posts go back to where they came from."""
+    if not g.user:
+        if _wants_json():
+            return jsonify(error="Log in to like artworks.", login_url=url_for("login")), 401
+        flash("Log in to like artworks.", "error")
+        return redirect(url_for("login"))
+    artwork = store.get_artwork(artwork_id)
+    if artwork is not None and artwork["user_id"] == str(g.user["id"]):
+        message = "You can't like your own artwork, but others can!"
+        if _wants_json():
+            return jsonify(error=message), 403
+        flash(message, "error")
+        return _back_to_art(artwork_id)
+    try:
+        liked, count = store.toggle_like(artwork_id, g.user["id"])
+    except store.NotAllowed:
+        if _wants_json():
+            return jsonify(error="This artwork isn't in the gallery anymore."), 404
+        abort(404)
+    if _wants_json():
+        return jsonify(liked=liked, like_count=count)
+    next_url = request.form.get("next") or ""
+    if next_url.startswith(("/gallery", "/art/")):
+        return redirect(next_url)
+    return _back_to_art(artwork_id)
+
+
+@app.route("/art/<artwork_id>/comments", methods=["POST"])
+@login_required
+def artwork_comment(artwork_id):
+    text = (request.form.get("text") or "").strip()
+    if not text:
+        flash("Write something before posting your comment.", "error")
+        return _back_to_art(artwork_id, "#comments")
+    if len(text) > MAX_COMMENT_CHARS:
+        flash(f"Comments can be up to {MAX_COMMENT_CHARS} characters.", "error")
+        return _back_to_art(artwork_id, "#comments")
+
+    now = time.time()
+    with _last_comment_lock:
+        if now - _last_comment_at.get(g.user["id"], 0) < COMMENT_COOLDOWN_SEC:
+            flash("You're commenting a little fast. Wait a few seconds and try again.", "error")
+            return _back_to_art(artwork_id, "#comments")
+        _last_comment_at[g.user["id"]] = now
+
+    try:
+        comment_id = store.add_comment(artwork_id, g.user, text)
+    except store.NotAllowed:
+        abort(404)
+    return _back_to_art(artwork_id, f"#comment-{comment_id}")
+
+
+@app.route("/comments/<comment_id>/delete", methods=["POST"])
+@login_required
+def comment_delete(comment_id):
+    """The comment's author, or the artist whose artwork it's on, can
+    delete it."""
+    comment = store.get_comment(comment_id)
+    if comment is None:
+        abort(404)
+    artwork = store.get_artwork(comment["artwork_id"])
+    artist_id = artwork["user_id"] if artwork else None
+    if str(g.user["id"]) not in (comment["user_id"], artist_id):
+        abort(404)
+    store.delete_comment(comment_id)
+    flash("Comment deleted.", "success")
+    return _back_to_art(comment["artwork_id"], "#comments")
+
+
+if os.environ.get("AURA_SKIP_WARMUP") != "1":
+    threading.Thread(target=_warm_up_analyzer, daemon=True).start()
 
 
 if os.environ.get("AURA_SKIP_WARMUP") != "1":

@@ -33,7 +33,7 @@
         <li><a href="{{ url_for('gallery') }}">Gallery</a></li>
         {% if g.user %}
           <li><a href="{{ url_for('board') }}">My Board</a></li>
-          <li><a href="{{ url_for('index') }}">Hi, {{ g.user['username'] }}</a></li>
+          <li><a href="{{ url_for('account') }}" title="Account">Hi, {{ g.user.display_name }}</a></li>
           <li><a href="{{ url_for('logout') }}" class="navbar-cta">Log Out</a></li>
         {% else %}
           <li><a href="{{ url_for('login') }}">Log In</a></li>
@@ -202,7 +202,7 @@
       </p>
       <p>
         {% if g.user %}
-          Welcome back, {{ g.user['username'] }}! You're ready to explore AURA.
+          Welcome back, {{ g.user.display_name }}! You're ready to explore AURA.
         {% else %}
           <a href="{{ url_for('signup') }}">Create an account</a> or <a href="{{ url_for('login') }}">log in</a> to get started.
         {% endif %}

@@ -18,18 +18,7 @@
         {% endif %}
       </div>
 
-      <ul class="navbar-menu" id="navbar-menu">
-        <li><a href="{{ url_for('index') }}">Home</a></li>
-        {% if g.user %}
-          <li><a href="{{ url_for('board') }}">My Board</a></li>
-          <li><a href="{{ url_for('gallery') }}" class="is-active">Gallery</a></li>
-          <li><a href="{{ url_for('logout') }}" class="navbar-cta">Log Out</a></li>
-        {% else %}
-          <li><a href="{{ url_for('gallery') }}" class="is-active">Gallery</a></li>
-          <li><a href="{{ url_for('login') }}">Log In</a></li>
-          <li><a href="{{ url_for('signup') }}" class="navbar-cta">Sign Up</a></li>
-        {% endif %}
-      </ul>
+      {% with active = 'gallery' %}{% include "_nav_menu.html" %}{% endwith %}
     </div>
   </nav>
 
@@ -41,16 +30,26 @@
       </div>
     </header>
 
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-list">
+          {% for category, message in messages %}
+            <div class="flash flash-{{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
     {% if artworks %}
       <ul class="art-grid">
         {% for art in artworks %}
           <li class="art-card">
-            <a class="art-card-image" href="{{ art.image_url }}" target="_blank" rel="noopener">
+            <a class="art-card-image" href="{{ art.page_url }}">
               <img src="{{ art.image_url }}" alt="{{ art.title }}" loading="lazy">
             </a>
             <div class="art-card-body">
-              <h2 class="art-card-title">{{ art.title }}</h2>
-              <p class="art-card-artist">by {{ art.username }}</p>
+              <h2 class="art-card-title"><a href="{{ art.page_url }}">{{ art.title }}</a></h2>
+              <p class="art-card-artist">by {{ art.artist }}</p>
               {% if art.analysis.song_title %}
                 <p class="art-card-song">♪ {{ art.analysis.song_title }}{% if art.analysis.song_artist %} · {{ art.analysis.song_artist }}{% endif %}</p>
               {% endif %}
@@ -62,6 +61,13 @@
                 {% if art.analysis.tempo_bpm %}{{ art.analysis.tempo_bpm }} BPM · {% endif %}
                 {{ art.date }}
               </p>
+              <div class="art-card-social">
+                {% include "_like_button.html" %}
+                <a class="social-count" href="{{ art.page_url }}#comments" title="Comments">
+                  <span aria-hidden="true">💬</span> {{ art.comment_count }}
+                  <span class="visually-hidden">comments</span>
+                </a>
+              </div>
             </div>
           </li>
         {% endfor %}
@@ -75,5 +81,6 @@
       </div>
     {% endif %}
   </main>
+  <script src="{{ url_for('static', filename='js/likes.js') }}"></script>
 </body>
 </html>

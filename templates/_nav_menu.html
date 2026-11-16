@@ -1,0 +1,15 @@
+{# Right-hand navigation links shared by the app pages. `active` names the
+   current page: "board", "gallery", or "account". #}
+<ul class="navbar-menu" id="navbar-menu">
+  <li><a href="{{ url_for('index') }}">Home</a></li>
+  {% if g.user %}
+    <li><a href="{{ url_for('board') }}"{% if active == 'board' %} class="is-active"{% endif %}>My Board</a></li>
+    <li><a href="{{ url_for('gallery') }}"{% if active == 'gallery' %} class="is-active"{% endif %}>Gallery</a></li>
+    <li><a href="{{ url_for('account') }}"{% if active == 'account' %} class="is-active"{% endif %} title="Account">{{ g.user.display_name }}</a></li>
+    <li><a href="{{ url_for('logout') }}" class="navbar-cta">Log Out</a></li>
+  {% else %}
+    <li><a href="{{ url_for('gallery') }}"{% if active == 'gallery' %} class="is-active"{% endif %}>Gallery</a></li>
+    <li><a href="{{ url_for('login') }}">Log In</a></li>
+    <li><a href="{{ url_for('signup') }}" class="navbar-cta">Sign Up</a></li>
+  {% endif %}
+</ul>
